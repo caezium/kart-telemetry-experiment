@@ -62,8 +62,8 @@ python -m analysis.vision_metrics  data/sessions/<session_id>/
 
 The pipeline reads Gyroflow **project files** (`.gyroflow` JSON), not CSV
 exports — see [pipeline/extract_imu.py](pipeline/extract_imu.py) for why
-(the CSV path tops out at video fps; we need the ~200 Hz raw IMU stream
-that lives inside the project file).
+(the CSV path tops out at video fps; we need the full-rate raw IMU stream
+that lives inside the project file — empirically **1 kHz on the Go 3S**).
 
 ## Project layout
 

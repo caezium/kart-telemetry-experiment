@@ -3,10 +3,11 @@ Extract clean IMU streams from Gyroflow project files (.gyroflow JSON).
 
 Why .gyroflow JSON and not the CSV export:
     Gyroflow's CSV export emits one sample per video frame (~30 Hz) for raw
-    gyro/accl. The per-IMU-sample (~200 Hz) data is only available inside
-    the .gyroflow project file, in the `gyro_source.file_metadata` blob.
-    Steering jerk (2nd derivative of angle) is the metric this project
-    cares about most — useless at 30 Hz, fine at 200 Hz.
+    gyro/accl. The per-IMU-sample data (1 kHz on a Go 3S, empirically) is
+    only available inside the .gyroflow project file, in the
+    `gyro_source.file_metadata` blob. Steering jerk (2nd derivative of
+    angle) is the metric this project cares about most — useless at 30 Hz,
+    excellent at 1 kHz.
 
 Decode pipeline (modern v4 writer):
     proj["gyro_source"]["file_metadata"]   # base91 string
@@ -45,7 +46,8 @@ from scipy.signal import butter, sosfiltfilt
 
 GYRO_LOWPASS_HZ = 30.0   # mechanical steering inputs do not exceed ~10-15 Hz
 ACCEL_LOWPASS_HZ = 20.0
-DEFAULT_TARGET_RATE_HZ = 200.0
+DEFAULT_TARGET_RATE_HZ = 1000.0   # Insta360 Go 3S; only used as a fallback
+                                  # if a recording has no inferable rate.
 RESAMPLE_TOLERANCE = 0.05   # if non-uniformity exceeds 5% of median dt, resample
 
 
