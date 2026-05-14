@@ -1,31 +1,26 @@
-"""Plot the steering wheel angle from a wheel-mounted .gyroflow recording.
+"""Quick steering-angle viewer for a single .gyroflow file. Limited use.
 
-What this measures:
-    Assuming the camera is mounted on the steering wheel hub with its lens
-    axis aligned with the steering rotation axis (Mount 1 in the project
-    brainstorm), the post-orientation Z gyro IS the steering angular
-    velocity. Integrating it over time gives steering angle.
+WHEN THIS WORKS:
+    Only when the camera is mounted with its lens axis aligned to the
+    steering column axis ("Mount 1" — canonical wheel-hub mount, lens
+    pointing along the column). In that case body-frame gz IS the
+    steering rate, and integrating it gives angle.
 
-    For Insta360 Go 3S, telemetry-parser applies the 'yXZ' axis convention,
-    which keeps the lens axis on Z. So `gz` after orientation = steering
-    rate, and this works out of the box.
+WHEN THIS DOES NOT WORK:
+    Tilted wheel mounts where the lens isn't along the column (the
+    user's "Mount 2" with lens angled forward/down to see the front
+    tire). For those mounts:
+      - The column axis in body frame is NOT gz; it's wherever PCA
+        of the gyro covariance points.
+      - The integrated rotation is contaminated by chassis yaw at
+        corner frequencies, which a high-pass filter cannot remove.
 
-Drift handling:
-    The integrator re-zeros itself whenever the rate sits near zero AND
-    the integrated angle has wandered near zero — a "wheel straight"
-    detection. Honest drift will accumulate over a long stint; the reset
-    keeps it bounded.
+For tilted mounts, or any case where you have MyChron / XRK data:
+    Use `analysis.per_lap` instead. It auto-detects the column axis
+    and subtracts chassis yaw using the XRK's GPS yaw rate, giving
+    clean per-corner steering input.
 
-Output:
-    - A two-panel PNG next to the input file (.steering.png): angle on
-      top, rate on bottom.
-    - Console summary: peak left, peak right, peak rate, time above 30°.
-
-Caveats:
-    If the camera was NOT wheel-mounted (helmet, chest, hand-held), the
-    integrated "angle" is just rotation about the camera's lens axis and
-    has no physical steering meaning.
-
+Usage:
     python -m analysis.steering_angle /path/to/file.gyroflow
 """
 
