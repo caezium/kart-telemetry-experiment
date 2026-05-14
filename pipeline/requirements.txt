@@ -11,3 +11,6 @@ pyarrow>=15.0  # parquet engine
 
 # tests
 pytest>=8.0
+
+# AiM MyChron / XRK reader
+libxrk>=0.11
