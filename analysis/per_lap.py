@@ -136,33 +136,88 @@ class LapData:
     xrk_t: dict[str, np.ndarray]          # channel name -> time array (s)
 
 
-def steering_angle_from_imu(stream: ImuStream, column_axis: np.ndarray,
-                            bias: np.ndarray, sign: int,
-                            hp_hz: float = 0.05) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Returns (t [s], steering_angle [deg], steering_rate [deg/s]).
+def column_tilt_factor(stream: ImuStream, column_axis: np.ndarray,
+                       quiet_rate_dps: float = 2.0) -> float:
+    """Compute |column · world_up| from the recording's gravity vector.
 
-    Math: project gyro onto column axis (sign-corrected), then high-pass
-    the cumulative integral to subtract the chassis-yaw leakage. What
-    remains is the wheel-relative-to-chassis rotation = steering input.
+    The wheel-mounted IMU sees:
+        ω_along_column = ω_steering + k * ω_chassis_yaw
+    where k = column · world_up (the cosine of the column tilt). The
+    sign of k is absorbed by the sync step's `sign` field, so we
+    return the magnitude here.
+
+    Why not get k from linear regression of (IMU vs GPS_Yaw_Rate)?
+    Because GPS_Yaw_Rate has measurement noise, which biases OLS slope
+    toward zero (classic errors-in-variables attenuation). Geometry
+    gives the right answer directly: k is fixed by chassis-and-mount
+    geometry, not estimated from noisy data.
     """
-    gyro = stream.gyro - bias
-    rate = sign * (gyro @ column_axis)             # rad/s along column
-    rate_dps = np.rad2deg(rate)
+    gmag = np.linalg.norm(stream.gyro, axis=1)
+    quiet = gmag < np.deg2rad(quiet_rate_dps)
+    if not quiet.any():
+        return 0.0
+    g_body = stream.accel[quiet].mean(axis=0)
+    world_up = -g_body / np.linalg.norm(g_body)
+    return float(abs(np.dot(column_axis, world_up)))
 
-    # Cumulative integral via trapezoidal
-    angle = np.zeros_like(rate)
-    angle[1:] = np.cumsum(0.5 * (rate[1:] + rate[:-1]) * np.diff(stream.t))
+
+def steering_angle_from_imu_xrk(stream: ImuStream, column_axis: np.ndarray,
+                                bias: np.ndarray, sign: int,
+                                tilt_factor: float,
+                                xrk_log, sync_offset_s: float,
+                                hp_hz: float = 0.05,
+                                glitch_threshold_dps: float = 400.0,
+                                ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Returns (t_xrk [s], steering_angle [deg], steering_rate [deg/s]).
+
+    Subtracts chassis yaw from the IMU column projection using XRK
+    GPS_Yaw_Rate, then integrates the residual. This is the right way
+    to get pure steering — HP-filtering alone leaves chassis-yaw
+    leakage at corner frequencies (which is exactly the band steering
+    inputs occupy).
+
+    `glitch_threshold_dps` zeroes out GPS yaw spikes that exceed any
+    physically plausible kart rate (typically 300-500 deg/s peak).
+    These spikes occur on GPS-fix instability and would otherwise be
+    integrated into the steering angle.
+    """
+    # 1. IMU column projection on XRK clock at native 1 kHz
+    gyro = stream.gyro - bias
+    rate_along_col = sign * (gyro @ column_axis)   # rad/s
+    t_imu_xrk = stream.t + sync_offset_s
+
+    # 2. GPS yaw rate, glitch-cleaned
+    yr_tbl = xrk_log.channels["GPS_Yaw_Rate"]
+    t_gps = np.asarray(yr_tbl["timecodes"]) / 1000.0
+    yr_dps = np.asarray(yr_tbl["GPS_Yaw_Rate"])
+    glitch = np.abs(yr_dps) > glitch_threshold_dps
+    if glitch.any():
+        yr_dps = np.where(glitch, np.nan, yr_dps)
+        ok = ~np.isnan(yr_dps)
+        yr_dps = np.interp(t_gps, t_gps[ok], yr_dps[ok])
+
+    # 3. Interpolate GPS yaw rate onto IMU grid (1 kHz) and subtract
+    yr_rps_on_imu = np.deg2rad(np.interp(t_imu_xrk, t_gps, yr_dps))
+    steer_rate_rps = rate_along_col - tilt_factor * yr_rps_on_imu
+
+    # 4. Integrate (trapezoidal)
+    angle = np.zeros_like(steer_rate_rps)
+    angle[1:] = np.cumsum(0.5 * (steer_rate_rps[1:] + steer_rate_rps[:-1])
+                          * np.diff(stream.t))
     angle_deg = np.rad2deg(angle)
 
-    # High-pass the angle to remove the chassis-yaw drift
+    # 5. Light HP to mop up any residual drift (e.g. very small mismatch in k,
+    #    or unmodelled chassis pitch/roll contributing along column).
     fs = stream.sample_rate_hz
     sos = butter(3, hp_hz / (fs / 2), btype="high", output="sos")
     angle_deg = sosfiltfilt(sos, angle_deg)
-    return stream.t, angle_deg, rate_dps
+
+    return t_imu_xrk, angle_deg, np.rad2deg(steer_rate_rps)
 
 
 def extract_lap(stream: ImuStream, log, sync_offset_s: float,
                 column_axis: np.ndarray, bias: np.ndarray, sign: int,
+                tilt_factor: float,
                 lap_num: int,
                 lap_windows: list[tuple[float, float]] | None = None,
                 ) -> LapData:
@@ -185,11 +240,10 @@ def extract_lap(stream: ImuStream, log, sync_offset_s: float,
     t_start_ms = int(t_start * 1000)
     t_end_ms = int(t_end * 1000)
 
-    # IMU: compute steering, then slice to this lap
-    t_imu_local, ang_deg, rate_dps = steering_angle_from_imu(
-        stream, column_axis, bias, sign,
+    # IMU: chassis-yaw-subtracted steering on XRK clock
+    t_imu_xrk, ang_deg, rate_dps = steering_angle_from_imu_xrk(
+        stream, column_axis, bias, sign, tilt_factor, log, sync_offset_s,
     )
-    t_imu_xrk = t_imu_local + sync_offset_s
     mask = (t_imu_xrk >= t_start) & (t_imu_xrk <= t_end)
 
     # XRK channels: slice each by its own timecodes
@@ -248,9 +302,10 @@ def plot_lap(lap: LapData, out_path: Path, title_suffix: str = "") -> None:
     ax_yaw.set_ylabel("kart yaw rate (deg/s)\n(XRK)")
     ax_yaw.grid(alpha=0.3)
 
-    # Speed
+    # Speed — XRK 'GPS Speed' is m/s; convert to km/h
     if "GPS Speed" in lap.xrk_channels:
-        ax_speed.plot(lap.xrk_t["GPS Speed"] - t0, lap.xrk_channels["GPS Speed"],
+        ax_speed.plot(lap.xrk_t["GPS Speed"] - t0,
+                      lap.xrk_channels["GPS Speed"] * 3.6,
                       lw=0.9, color="tab:green")
         ax_speed.set_ylabel("GPS speed (km/h)")
     ax_speed.set_xlabel("lap time (s)")
@@ -262,10 +317,10 @@ def plot_lap(lap: LapData, out_path: Path, title_suffix: str = "") -> None:
         lat = lap.xrk_channels["GPS Latitude"]
         lon = lap.xrk_channels["GPS Longitude"]
         if "GPS Speed" in lap.xrk_channels:
-            # Interp speed onto GPS samples
+            # Interp speed onto GPS samples; convert m/s → km/h
             t_gps = lap.xrk_t["GPS Latitude"]
             t_sp = lap.xrk_t["GPS Speed"]
-            sp_lat = np.interp(t_gps, t_sp, lap.xrk_channels["GPS Speed"])
+            sp_lat = np.interp(t_gps, t_sp, lap.xrk_channels["GPS Speed"]) * 3.6
             sc = ax_map.scatter(lon, lat, c=sp_lat, s=4, cmap="viridis")
             plt.colorbar(sc, ax=ax_map, label="speed (km/h)", shrink=0.7)
         else:
@@ -359,27 +414,40 @@ def main() -> None:
                 full_laps = list(zip(targets, xrk_durations))
             targets = [max(full_laps, key=lambda x: x[1])[0]]
 
+    # Compute the column-tilt factor once; used by all laps.
+    tilt = column_tilt_factor(stream, sync.column_axis)
+    print(f"  column tilt factor k = |column·up| = {tilt:.4f}  "
+          f"(tilt {np.rad2deg(np.arccos(tilt)):.1f}° from world-vertical)")
+    print()
+
     for lap_num in targets:
         lap = extract_lap(
             stream, log, sync.offset_imu_to_xrk_s,
-            sync.column_axis, sync.gyro_bias, sync.sign,
+            sync.column_axis, sync.gyro_bias, sync.sign, tilt,
             lap_num, lap_windows=lap_windows,
         )
         out = out_dir / f"{args.gyroflow.stem}.lap{lap_num}.png"
         plot_lap(
             lap, out,
             title_suffix=f"sync corr={sync.corr_peak:.2f}, "
-                         f"offset={sync.offset_imu_to_xrk_s:+.2f}s",
+                         f"offset={sync.offset_imu_to_xrk_s:+.2f}s, "
+                         f"k={tilt:.3f}",
         )
         peak_steer = float(np.abs(lap.steering_angle_deg).max())
-        peak_yaw = (float(np.abs(lap.xrk_channels["GPS_Yaw_Rate"]).max())
-                    if "GPS_Yaw_Rate" in lap.xrk_channels else float("nan"))
-        peak_speed = (float(lap.xrk_channels["GPS Speed"].max())
-                      if "GPS Speed" in lap.xrk_channels else float("nan"))
+        # Filter out GPS glitches (>400°/s is unphysical for kart) before reporting
+        if "GPS_Yaw_Rate" in lap.xrk_channels:
+            yr = lap.xrk_channels["GPS_Yaw_Rate"]
+            yr_clean = yr[np.abs(yr) <= 400]
+            peak_yaw = float(np.abs(yr_clean).max()) if len(yr_clean) else float("nan")
+        else:
+            peak_yaw = float("nan")
+        # GPS Speed in XRK is m/s; convert to km/h
+        peak_speed_kmh = (float(lap.xrk_channels["GPS Speed"].max() * 3.6)
+                          if "GPS Speed" in lap.xrk_channels else float("nan"))
         print(f"  lap {lap_num}: {lap.duration:6.2f}s   "
               f"peak steer ±{peak_steer:>5.0f}°   "
               f"peak yaw rate ±{peak_yaw:>5.0f}°/s   "
-              f"peak speed {peak_speed:>5.1f} km/h   "
+              f"peak speed {peak_speed_kmh:>5.1f} km/h   "
               f"→ {out.name}")
 
 
