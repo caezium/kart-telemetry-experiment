@@ -14,3 +14,7 @@ pytest>=8.0
 
 # AiM MyChron / XRK reader
 libxrk>=0.11
+
+# notebook (analysis.ipynb)
+jupyter>=1.0
+ipykernel>=6.0

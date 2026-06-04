@@ -9,9 +9,11 @@ Not a replacement for proper data systems. A sub-$1k addition that
 captures channels the MyChron does not: steering smoothness, look-ahead
 timing, inside-front lift, slip angle.
 
-**See [`RESULTS.md`](RESULTS.md) for end-to-end validation on a real
-session.** Six clean laps recovered from a 9-minute wheel-cam + XRK
-recording, with proper sync and steering extraction.
+**For review: open [`analysis.ipynb`](analysis.ipynb).** Single Jupyter
+notebook, whole workflow end-to-end, plots embedded inline. Walks through
+sync, geometry, lap detection, and per-lap visualization for the May 11
+XTreme session. The narrative form of [`RESULTS.md`](RESULTS.md) — but
+self-executing.
 
 ## What this measures
 
@@ -46,25 +48,30 @@ python3 -m venv .venv --system-site-packages
 .venv/bin/pip install -r pipeline/requirements.txt
 ```
 
-**Per session — the primary path:**
+**Per session — primary path (notebook):**
 
 ```bash
 # 1. Export a .gyroflow project file from the wheel video.
 #    In Gyroflow: open the .mp4 → File → Save (creates `*.gyroflow`).
-#    This is the only manual step; everything else is automated.
 
 # 2. Copy the .xrk off the MyChron's SD card.
 
-# 3. Run the pipeline.
+# 3. Edit the GYROFLOW / XRK paths at the top of analysis.ipynb,
+#    then run all cells. Plots and stats appear inline.
+.venv/bin/jupyter notebook analysis.ipynb
+```
+
+**Or from the command line:**
+
+```bash
 .venv/bin/python -m analysis.per_lap \
     path/to/wheel.gyroflow \
     path/to/session.xrk \
     --all --out-dir results/my_session/
 ```
 
-Generates one 4-panel PNG per lap: steering angle, kart yaw rate, GPS
-speed, GPS track overlay colored by speed. Prints a stats table to the
-console.
+Either route generates one 4-panel summary per lap (steering angle,
+kart yaw rate, GPS speed, GPS track) and a stats table.
 
 Sample output (real session, see [RESULTS.md](RESULTS.md)):
 
@@ -129,6 +136,7 @@ kart-telemetry-experiment/
 ├── README.md             this file
 ├── RESULTS.md            end-to-end validation on a real session
 ├── ROADMAP.md            experimental phases, what's next
+├── analysis.ipynb        full workflow notebook (review starts here)
 ├── pipeline/
 │   ├── extract_imu.py    .gyroflow project file → uniform-rate ImuStream parquet
 │   ├── calibrate.py      Phase 0 bench-validation harness, writes result.json
