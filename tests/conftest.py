@@ -146,6 +146,116 @@ def make_step_rotation_trace(
 
 
 # ---------------------------------------------------------------------------
+# Fake XRK log — mimics the libxrk.LogFile surface the code actually uses
+# ---------------------------------------------------------------------------
+
+class FakeChannelTable:
+    """Mimics a pyarrow table: indexable by column name, has num_rows and
+    column_names. Enough for np.asarray(tbl["col"]) and the slicing code."""
+
+    def __init__(self, columns: dict):
+        self._cols = {k: np.asarray(v) for k, v in columns.items()}
+
+    @property
+    def num_rows(self) -> int:
+        return len(next(iter(self._cols.values()))) if self._cols else 0
+
+    @property
+    def column_names(self) -> list:
+        return list(self._cols.keys())
+
+    def __getitem__(self, key):
+        return self._cols[key]
+
+
+class FakeLapsTable:
+    """Mimics the pyarrow laps table: columns num/start_time/end_time, each
+    indexable to an object with .as_py()."""
+
+    class _Cell:
+        def __init__(self, v):
+            self._v = v
+
+        def as_py(self):
+            return self._v
+
+    class _Col:
+        def __init__(self, vals):
+            self._vals = list(vals)
+
+        def __getitem__(self, i):
+            return FakeLapsTable._Cell(self._vals[i])
+
+        def to_pylist(self):
+            return list(self._vals)
+
+    def __init__(self, nums, starts_ms, ends_ms):
+        self._cols = {"num": list(nums), "start_time": list(starts_ms),
+                      "end_time": list(ends_ms)}
+        self.num_rows = len(nums)
+
+    def __getitem__(self, key):
+        return FakeLapsTable._Col(self._cols[key])
+
+
+class FakeXrkLog:
+    """Mimics libxrk.LogFile: .channels dict + .laps table + .metadata."""
+
+    def __init__(self, channels: dict, laps: FakeLapsTable | None = None,
+                 metadata: dict | None = None):
+        self.channels = channels
+        self.laps = laps or FakeLapsTable([], [], [])
+        self.metadata = metadata or {}
+
+
+def make_gps_yaw_channel(t_s: np.ndarray, yaw_dps: np.ndarray) -> FakeChannelTable:
+    return FakeChannelTable({
+        "timecodes": np.asarray(t_s) * 1000.0,
+        "GPS_Yaw_Rate": np.asarray(yaw_dps),
+    })
+
+
+def make_gps_track_log(
+    t_s: np.ndarray,
+    dist_m: np.ndarray,
+    speed_mps: float | np.ndarray = 20.0,
+    yaw_dps: np.ndarray | None = None,
+    lon_length_delta: int = 0,
+) -> FakeXrkLog:
+    """Build a FakeXrkLog with GPS Latitude/Longitude/Speed (+optional yaw).
+
+    `dist_m` is the desired distance-from-first-sample profile; it's encoded
+    as a pure-latitude offset (lon held constant) so the module's
+    equirectangular distance recovers it. `lon_length_delta` lets a test
+    make the Longitude channel a different length than Latitude (to exercise
+    the misalignment-tolerant interp path).
+    """
+    t_s = np.asarray(t_s, dtype=float)
+    dist_m = np.asarray(dist_m, dtype=float)
+    deg_per_m = 1.0 / (6_371_000.0 * np.pi / 180.0)
+    lat = dist_m * deg_per_m
+    lon = np.zeros_like(lat)
+    speed = np.full_like(t_s, float(speed_mps)) if np.isscalar(speed_mps) else np.asarray(speed_mps, float)
+
+    chans = {
+        "GPS Latitude": FakeChannelTable({"timecodes": t_s * 1000.0, "GPS Latitude": lat}),
+        "GPS Speed": FakeChannelTable({"timecodes": t_s * 1000.0, "GPS Speed": speed}),
+    }
+    if lon_length_delta:
+        n = len(t_s) + lon_length_delta
+        t_lon = np.linspace(t_s[0], t_s[-1], n)
+        lon_resampled = np.interp(t_lon, t_s, lon)
+        chans["GPS Longitude"] = FakeChannelTable(
+            {"timecodes": t_lon * 1000.0, "GPS Longitude": lon_resampled})
+    else:
+        chans["GPS Longitude"] = FakeChannelTable(
+            {"timecodes": t_s * 1000.0, "GPS Longitude": lon})
+    if yaw_dps is not None:
+        chans["GPS_Yaw_Rate"] = make_gps_yaw_channel(t_s, yaw_dps)
+    return FakeXrkLog(chans)
+
+
+# ---------------------------------------------------------------------------
 # Pytest fixtures
 # ---------------------------------------------------------------------------
 

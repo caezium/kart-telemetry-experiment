@@ -21,7 +21,7 @@ axis isn't aligned with any body axis.
 
 ```
 offset (IMU → XRK):   -14.027 s
-peak |corr|:           0.7835            ← strong match
+peak |corr|:           0.658             ← strong match (normalized cross-correlation, 0..1)
 sign:                  -1                ← IMU column axis flipped to match GPS convention
 column tilt:           40.6° from vertical (k = 0.7588)
 ```
@@ -39,12 +39,12 @@ Notes:
 
 | Lap | Duration | Peak steering | Peak yaw rate | Peak speed | Mean speed |
 |----:|---------:|--------------:|--------------:|-----------:|-----------:|
-| 0   | 54.08 s  | ±63°          | ±309°/s       | 91.4 km/h  | (out-lap)  |
+| 0   | 54.08 s  | ±64°          | ±309°/s       | 90.9 km/h  | (out-lap)  |
 | 1   | 44.56 s  | ±43°          | ±161°/s       | 107.1 km/h | ~70 km/h   |
 | 2   | 44.32 s  | ±74°          | ±263°/s       | 108.6 km/h | ~70 km/h   |
 | 3   | 44.64 s  | ±57°          | ±267°/s       | 108.6 km/h | ~70 km/h   |
 | **4** | **43.44 s** | **±41°**  | ±125°/s       | 106.9 km/h | ~70 km/h   |
-| 5   | 49.48 s  | ±54°          | ±381°/s       | 108.5 km/h | (in-lap)   |
+| 5   | 49.48 s  | ±55°          | ±381°/s       | 108.5 km/h | (in-lap)   |
 
 **Lap 4 is the fastest** (43.44 s) and also has the smallest peak
 steering (±41°) and lowest peak yaw rate (±125°/s) — the cleanest,

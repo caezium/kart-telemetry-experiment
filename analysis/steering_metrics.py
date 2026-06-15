@@ -1,14 +1,26 @@
 """
 Compute steering input metrics from a wheel-mounted Go 3S IMU stream.
 
+⚠ SCOPE / KNOWN LIMITATION
+    This module integrates a SINGLE body axis (`STEER_AXIS`, default gz)
+    with NO chassis-yaw subtraction. That is only correct for the
+    canonical "Mount 1" geometry — camera lens-axis aligned with the
+    steering column. For a tilted wheel mount (lens angled at the tire),
+    the integrated angle is contaminated by chassis yaw at corner
+    frequencies, which a high-pass filter cannot remove (see commit that
+    added analysis/per_lap.py).
+
+    The CORRECT path, whenever MyChron/XRK data is available, is
+    `analysis.per_lap.steering_from_synced`, which subtracts
+    k · GPS_Yaw_Rate using the PCA-detected column axis. This module is
+    retained only for the lens-along-column case and for IMU-only
+    sessions with no logger. `analyze()` emits a runtime warning so the
+    divergence between the two paths is never silent.
+
 The wheel-mount convention used here:
     - Camera lens-axis (z) aligned with the steering rotation axis
     - gyro_z is therefore steering angular velocity, rad/s
     - Positive gz = right turn (driver-perspective clockwise)
-
-If the camera was mounted with a different axis aligned to the column,
-override `STEER_AXIS` below. A bench calibration (Phase 0) confirms which
-axis is which.
 
 Outputs per session:
     - angle, rate, jerk timeseries
@@ -134,6 +146,15 @@ def compute_corner_metrics(
 
 
 def analyze(session_dir: Path) -> pd.DataFrame:
+    import warnings
+    warnings.warn(
+        "steering_metrics integrates a single body axis with no chassis-yaw "
+        "subtraction (correct only for a lens-along-column mount). For a tilted "
+        "wheel mount or any session with MyChron/XRK data, use "
+        "analysis.per_lap instead — the angle here will be contaminated by "
+        "chassis yaw at corner frequencies.",
+        stacklevel=2,
+    )
     wheel_path = session_dir / "extracted" / "wheel_imu.parquet"
     if not wheel_path.exists():
         raise SystemExit(f"{wheel_path} not found; run extract_imu.py first")

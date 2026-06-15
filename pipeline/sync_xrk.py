@@ -27,6 +27,11 @@ gyro covariance matrix (PCA), and k = |column · world_up|.  The same
 recording gives us both: PCA finds the column from the gyro, and the
 gravity vector from quiet-sample accelerometer averaging gives world_up.
 
+The PCA column axis is sign-corrected (via the cross-correlation sign) and
+stored in `SyncedXrk.column_axis` so that `gyro @ column_axis` is already
+the chassis-yaw-positive steering rate — downstream code never re-applies
+a sign.
+
 Usage
 -----
     python -m pipeline.sync_xrk wheel.gyroflow session.xrk
@@ -38,6 +43,7 @@ import argparse
 import contextlib
 import io
 import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
@@ -62,6 +68,9 @@ EDGE_TRIM_S = 5.0             # trim IMU ends — Butterworth ringing + handling
                               # the variance otherwise and pull the correlation.
 QUIET_RATE_DPS = 2.0          # threshold for "wheel approximately stationary"
                               # samples used to estimate bias and gravity
+GPS_YAW_GLITCH_DPS = 400.0    # |GPS_Yaw_Rate| above this is a GPS fix wobble,
+                              # not real kart rotation — clean before use.
+MIN_QUIET_SAMPLES = 50        # below this, gravity/bias geometry is unreliable
 
 
 # ---------------------------------------------------------------------------
@@ -69,29 +78,50 @@ QUIET_RATE_DPS = 2.0          # threshold for "wheel approximately stationary"
 # ---------------------------------------------------------------------------
 
 @contextlib.contextmanager
-def _silence_stderr() -> Iterator[None]:
+def _silence_stderr() -> Iterator[str]:
     """libxrk emits `Unknown units[...]` lines to stderr at file-load time
-    for channels whose units aren't in its table. They're cosmetic; swallow
-    them. Restores stderr on exit (unlike a global reassignment).
+    for channels whose units aren't in its table. They're cosmetic; capture
+    them so they don't clutter output, but yield the buffer so a caller can
+    inspect it if a genuine error was reported. Restores stderr on exit.
     """
     old = sys.stderr
-    sys.stderr = io.StringIO()
+    buf = io.StringIO()
+    sys.stderr = buf
     try:
-        yield
+        yield buf
     finally:
         sys.stderr = old
 
 
 def load_xrk(xrk_path: Path):
-    """Wrap libxrk.aim_xrk(). Returns the LogFile object."""
+    """Wrap libxrk.aim_xrk(). Returns the LogFile object.
+
+    The `import libxrk` is deferred (function-local) so that importing this
+    module — e.g. to reuse the cross-correlation helpers in tests — doesn't
+    hard-require the optional libxrk dependency until a file is actually read.
+    """
     import libxrk
-    with _silence_stderr():
-        return libxrk.aim_xrk(str(xrk_path))
+    with _silence_stderr() as captured:
+        try:
+            return libxrk.aim_xrk(str(xrk_path))
+        except Exception:
+            # Surface anything libxrk printed to stderr — it's the only place
+            # the C layer reports decode failures.
+            noise = captured.getvalue().strip()
+            if noise:
+                print(noise, file=sys.stderr)
+            raise
 
 
 # ---------------------------------------------------------------------------
 # Body-frame geometry from the IMU
 # ---------------------------------------------------------------------------
+
+def _quiet_mask(gyro: np.ndarray, quiet_rate_dps: float = QUIET_RATE_DPS) -> np.ndarray:
+    """Boolean mask of samples where the wheel is ≈stationary."""
+    mag = np.linalg.norm(gyro, axis=1)
+    return mag < np.deg2rad(quiet_rate_dps)
+
 
 def detect_column_axis(gyro: np.ndarray) -> np.ndarray:
     """PCA of gyro covariance: the principal eigenvector is the wheel
@@ -100,7 +130,8 @@ def detect_column_axis(gyro: np.ndarray) -> np.ndarray:
     Works for any wheel-mounted camera regardless of how it's angled.
     Sign is canonicalised so the +Z-dominant direction wins; the actual
     sign convention for steering (left/right positive) is then resolved
-    by `cross_correlate_offset` returning `sign = ±1`.
+    by `cross_correlate_offset` returning `sign = ±1`, which `sync_imu_to_xrk`
+    folds back into the stored axis.
     """
     centred = gyro - gyro.mean(axis=0)
     cov = centred.T @ centred / len(centred)
@@ -117,12 +148,22 @@ def estimate_quiet_bias(gyro: np.ndarray,
     """Per-axis gyro bias from low-rate samples. Even a session with
     ~5% quiet moments gives a clean estimate (typically 23k+ samples
     at 1 kHz × 25s of stillness across the recording).
+
+    Returns zeros if there are no quiet samples — callers should check
+    the quiet-sample count (see `count_quiet_samples`) to know whether
+    the estimate is trustworthy rather than treating zeros as a real bias.
     """
-    mag = np.linalg.norm(gyro, axis=1)
-    quiet = mag < np.deg2rad(quiet_rate_thresh_dps)
+    quiet = _quiet_mask(gyro, quiet_rate_thresh_dps)
     if not quiet.any():
         return np.zeros(3)
     return gyro[quiet].mean(axis=0)
+
+
+def count_quiet_samples(gyro: np.ndarray,
+                        quiet_rate_dps: float = QUIET_RATE_DPS) -> int:
+    """How many ≈stationary samples the recording contains. Used to decide
+    whether the gravity/bias geometry is trustworthy."""
+    return int(_quiet_mask(gyro, quiet_rate_dps).sum())
 
 
 def estimate_column_tilt_factor(stream: ImuStream, column_axis: np.ndarray,
@@ -141,14 +182,19 @@ def estimate_column_tilt_factor(stream: ImuStream, column_axis: np.ndarray,
     GPS_Yaw_Rate has measurement noise, which biases OLS slope toward
     zero (errors-in-variables attenuation). Geometry is exact.
 
-    Returns the magnitude; the sign is folded into the sync `sign` field.
+    Returns the magnitude; the sign is folded into the stored column axis.
+    Returns NaN if there are no quiet samples — k=NaN propagates loudly
+    instead of a silent 0.0 that would disable chassis-yaw subtraction
+    while looking like a real horizontal-column geometry.
     """
-    mag = np.linalg.norm(stream.gyro, axis=1)
-    quiet = mag < np.deg2rad(quiet_rate_dps)
+    quiet = _quiet_mask(stream.gyro, quiet_rate_dps)
     if not quiet.any():
-        return 0.0
+        return float("nan")
     g_body = stream.accel[quiet].mean(axis=0)
-    world_up = -g_body / np.linalg.norm(g_body)
+    norm = np.linalg.norm(g_body)
+    if norm < 1e-6:
+        return float("nan")
+    world_up = -g_body / norm
     return float(abs(np.dot(column_axis, world_up)))
 
 
@@ -164,7 +210,9 @@ def chassis_yaw_from_imu(stream: ImuStream,
 
     `edge_trim_s` trims that many seconds off each end — the LP filter has
     ringing at the boundaries, and the very start/end usually contain
-    camera-handling transients that aren't real motion.
+    camera-handling transients that aren't real motion. The trim is skipped
+    (rather than emptying the signal) when it's 0 or would consume the whole
+    recording, so short clips and `edge_trim_s=0` still work.
     """
     bias = estimate_quiet_bias(stream.gyro)
     gyro = stream.gyro - bias
@@ -176,6 +224,8 @@ def chassis_yaw_from_imu(stream: ImuStream,
     yaw_lp = sosfiltfilt(sos, rate_along_col)
 
     trim = int(edge_trim_s * fs)
+    if trim <= 0 or 2 * trim >= len(stream.t):
+        return stream.t, yaw_lp, n_col, bias
     return stream.t[trim:-trim], yaw_lp[trim:-trim], n_col, bias
 
 
@@ -183,14 +233,45 @@ def chassis_yaw_from_imu(stream: ImuStream,
 # XRK side
 # ---------------------------------------------------------------------------
 
+def clean_gps_yaw_dps(t_gps: np.ndarray, yr_dps: np.ndarray,
+                      glitch_threshold_dps: float = GPS_YAW_GLITCH_DPS,
+                      ) -> np.ndarray:
+    """Remove GPS fix-instability spikes from a yaw-rate trace (deg/s).
+
+    GPS_Yaw_Rate occasionally reports physically impossible values (we've
+    seen 2500°/s) when the fix wobbles, and may contain NaN/inf. Both are
+    treated as bad and linearly interpolated over from neighbouring good
+    samples. Only the bad samples are replaced (good samples are untouched).
+
+    This is the single source of yaw cleaning, used by BOTH the
+    cross-correlation sync and the steering subtraction, so the two never
+    disagree about which samples are real.
+
+    If every sample is bad, returns zeros (no usable yaw information).
+    """
+    yr = np.asarray(yr_dps, dtype=float).copy()
+    bad = ~np.isfinite(yr) | (np.abs(yr) > glitch_threshold_dps)
+    if bad.all():
+        return np.zeros_like(yr)
+    if bad.any():
+        good = ~bad
+        yr[bad] = np.interp(t_gps[bad], t_gps[good], yr[good])
+    return yr
+
+
 def chassis_yaw_from_xrk(log) -> tuple[np.ndarray, np.ndarray]:
-    """Returns (t [s], yaw_rate [rad/s]) from XRK `GPS_Yaw_Rate` channel."""
+    """Returns (t [s], yaw_rate [rad/s]) from XRK `GPS_Yaw_Rate`, glitch-cleaned.
+
+    The cleaning happens here at the source so the cross-correlation sync
+    aligns against the same de-spiked signal the steering extraction uses.
+    """
     tbl = log.channels.get("GPS_Yaw_Rate")
     if tbl is None:
         raise ValueError("XRK has no GPS_Yaw_Rate channel — cannot sync.")
-    t_ms = np.asarray(tbl["timecodes"])
-    yr_dps = np.asarray(tbl["GPS_Yaw_Rate"])
-    return t_ms / 1000.0, np.deg2rad(yr_dps)
+    t_ms = np.asarray(tbl["timecodes"], dtype=np.float64)
+    yr_dps = np.asarray(tbl["GPS_Yaw_Rate"], dtype=np.float64)
+    t_s = t_ms / 1000.0
+    return t_s, np.deg2rad(clean_gps_yaw_dps(t_s, yr_dps))
 
 
 # ---------------------------------------------------------------------------
@@ -199,12 +280,24 @@ def chassis_yaw_from_xrk(log) -> tuple[np.ndarray, np.ndarray]:
 
 def _robust_normalise(x: np.ndarray) -> np.ndarray:
     """Zero-median, MAD-scaled. Resistant to outlier spikes that would
-    dominate a std-based normalization (e.g. handling bumps when fitting
-    or removing the camera).
+    dominate a std-based normalization.
+
+    The scale floor is relative to the signal, not an absolute 1e-12: when
+    the signal is flat over >50% of its samples the MAD collapses to 0, so
+    we fall back to the std; a truly constant signal returns zeros (it
+    carries no alignment information and must not be divided by ~0, which
+    would blow a single spike up to ~1e12 and hijack the correlation).
     """
+    x = np.asarray(x, dtype=float)
     m = np.median(x)
-    s = 1.4826 * np.median(np.abs(x - m)) + 1e-12
-    return (x - m) / s
+    centred = x - m
+    mad = np.median(np.abs(centred))
+    s = 1.4826 * mad
+    if s <= 1e-9:                       # MAD collapsed (mostly-flat signal)
+        s = float(centred.std())
+    if s <= 1e-12:                      # genuinely constant signal
+        return np.zeros_like(x)
+    return centred / s
 
 
 def cross_correlate_offset(t_imu: np.ndarray, yaw_imu: np.ndarray,
@@ -216,10 +309,11 @@ def cross_correlate_offset(t_imu: np.ndarray, yaw_imu: np.ndarray,
 
     Returns (offset_imu_to_xrk_s, peak_normalized_corr, sign).
       - offset: add this to IMU `t` to land on XRK time.
-      - peak: |normalized correlation| at best lag, 0..1.
+      - peak: |normalized cross-correlation| at the best lag, genuinely in
+        [0, 1] (Pearson-style: divided by the product of the per-lag window
+        L2 norms, so the `< 0.5 = weak` gate downstream is calibrated).
       - sign: ±1; if -1, the IMU signal had to be flipped (PCA-detected
-        column axis points opposite to GPS-yaw convention). Downstream
-        consumers should multiply IMU column projection by this sign.
+        column axis points opposite to GPS-yaw convention).
     """
     dt = 1.0 / fs
 
@@ -229,23 +323,32 @@ def cross_correlate_offset(t_imu: np.ndarray, yaw_imu: np.ndarray,
     y_i = _robust_normalise(np.interp(grid_i, t_imu, yaw_imu))
     y_x = _robust_normalise(np.interp(grid_x, t_xrk, yaw_xrk))
 
-    # Cross-correlation. correlate(a, b)[k] = sum_n a[n] · b[n - lag]
+    # Numerator: sliding dot product. correlate(a,b)[k] = Σ a[n]·b[n-lag].
     raw_corr = correlate(y_i, y_x, mode="full")
+
+    # Denominator: per-lag product of the two overlapping windows' L2 norms,
+    # computed as sliding sums of squares (correlate with an ones kernel).
+    # This makes the result a true normalized cross-correlation, bounded
+    # to [-1, 1] by Cauchy-Schwarz — unlike dividing by the overlap count.
+    energy_i = correlate(y_i ** 2, np.ones_like(y_x), mode="full")
+    energy_x = correlate(np.ones_like(y_i), y_x ** 2, mode="full")
+    denom = np.sqrt(np.maximum(energy_i, 0.0) * np.maximum(energy_x, 0.0))
+    ncc = np.where(denom > 1e-12, raw_corr / np.maximum(denom, 1e-12), 0.0)
+
     lag_samples = np.arange(-len(y_x) + 1, len(y_i))
     lag_s = lag_samples * dt
 
-    # Per-lag normalisation: divide by overlap count. Require ≥1s overlap.
+    # Require ≥1s overlap and constrain to ±max_lag_s.
     overlap = np.minimum.reduce([
         len(y_i) - np.maximum(lag_samples, 0),
         len(y_x) + np.minimum(lag_samples, 0),
     ])
-    valid = overlap >= int(fs * 1.0)
-    norm_corr = np.where(valid, raw_corr / np.maximum(overlap, 1), 0.0)
-    norm_corr = np.where(np.abs(lag_s) <= max_lag_s, norm_corr, 0.0)
+    valid = (overlap >= int(fs * 1.0)) & (np.abs(lag_s) <= max_lag_s)
+    ncc = np.where(valid, ncc, 0.0)
 
-    best = int(np.argmax(np.abs(norm_corr)))
-    sign = int(np.sign(norm_corr[best])) or 1
-    peak = float(np.abs(norm_corr[best]))
+    best = int(np.argmax(np.abs(ncc)))
+    sign = int(np.sign(ncc[best])) or 1
+    peak = float(np.abs(ncc[best]))
     best_lag_s = float(lag_s[best])
 
     # Translate cross-correlation lag → clock offset on IMU time:
@@ -268,20 +371,29 @@ class SyncedXrk:
     xrk_path: Path
     # Sync timing
     offset_imu_to_xrk_s: float    # add to IMU `t` to land on XRK clock
-    corr_peak: float              # 0..1, sync quality (>0.5 confident)
-    sign: int                     # +1 or -1; multiply IMU column projection by this
+    corr_peak: float              # [0, 1] normalized cross-correlation (>0.5 confident)
+    sign: int                     # detected ±1; ALREADY folded into column_axis below
     # Body-frame geometry (from the IMU recording)
-    column_axis: np.ndarray       # principal rotation axis in body frame (unit)
-    column_tilt_factor: float     # k = |column · world_up|, used to subtract
-                                  # chassis yaw from the column projection
+    column_axis: np.ndarray       # sign-corrected unit axis; gyro @ column_axis is
+                                  # the chassis-yaw-positive steering rate directly
+    column_tilt_factor: float     # k = |column · world_up|, used to subtract chassis
+                                  # yaw; NaN if geometry could not be estimated
     gyro_bias: np.ndarray         # per-axis rad/s, from quiet samples
-    # Convenience: the parsed XRK log, so callers don't reload it
+    quiet_sample_count: int       # # of ≈stationary samples backing bias/tilt
+    # Loaded inputs, so callers don't reload them
+    imu_stream: object            # extract_imu.ImuStream (the loaded wheel IMU)
     xrk_log: object               # libxrk.LogFile
 
     @property
     def column_tilt_deg(self) -> float:
         """Column tilt from world-vertical (degrees), for reporting."""
-        return float(np.rad2deg(np.arccos(self.column_tilt_factor)))
+        return float(np.rad2deg(np.arccos(np.clip(self.column_tilt_factor, -1.0, 1.0))))
+
+    @property
+    def geometry_reliable(self) -> bool:
+        """True if there were enough quiet samples to trust bias + tilt."""
+        return (self.quiet_sample_count >= MIN_QUIET_SAMPLES
+                and np.isfinite(self.column_tilt_factor))
 
 
 def sync_imu_to_xrk(gyroflow_path: Path, xrk_path: Path,
@@ -289,7 +401,8 @@ def sync_imu_to_xrk(gyroflow_path: Path, xrk_path: Path,
                     lowpass_hz: float = DEFAULT_LP_HZ,
                     ) -> SyncedXrk:
     """End-to-end sync. Loads both files, runs cross-correlation, returns
-    everything downstream tools need.
+    everything downstream tools need (including the loaded IMU stream, so
+    callers don't parse the .gyroflow a second time).
     """
     from pipeline.extract_imu import load_gyroflow
 
@@ -301,7 +414,20 @@ def sync_imu_to_xrk(gyroflow_path: Path, xrk_path: Path,
     offset, peak, sign = cross_correlate_offset(
         t_imu, yaw_imu, t_xrk, yaw_xrk, max_lag_s=max_lag_s,
     )
-    tilt = estimate_column_tilt_factor(stream, n_col)
+
+    # Fold the detected sign into the stored axis so consumers never re-apply it.
+    column_axis = sign * n_col
+    tilt = estimate_column_tilt_factor(stream, column_axis)
+    n_quiet = count_quiet_samples(stream.gyro)
+
+    if n_quiet < MIN_QUIET_SAMPLES or not np.isfinite(tilt):
+        warnings.warn(
+            f"Only {n_quiet} quiet samples in {gyroflow_path.name}; gyro bias "
+            f"and column-tilt (k={tilt:.3f}) geometry are unreliable. Steering "
+            f"output may retain chassis yaw. Capture a few seconds of stillness "
+            f"(wheel centred, kart stopped) for a trustworthy result.",
+            stacklevel=2,
+        )
 
     return SyncedXrk(
         gyroflow_path=gyroflow_path,
@@ -309,9 +435,11 @@ def sync_imu_to_xrk(gyroflow_path: Path, xrk_path: Path,
         offset_imu_to_xrk_s=offset,
         corr_peak=peak,
         sign=sign,
-        column_axis=n_col,
+        column_axis=column_axis,
         column_tilt_factor=tilt,
         gyro_bias=bias,
+        quiet_sample_count=n_quiet,
+        imu_stream=stream,
         xrk_log=log,
     )
 
@@ -332,11 +460,12 @@ def main() -> None:
     print(f"column tilt:        {r.column_tilt_deg:.1f}° from vertical  (k={r.column_tilt_factor:.4f})")
     print(f"gyro bias (dps):    ({np.rad2deg(r.gyro_bias[0]):+.4f}, "
           f"{np.rad2deg(r.gyro_bias[1]):+.4f}, {np.rad2deg(r.gyro_bias[2]):+.4f})")
-    print(f"sign:               {r.sign:+d}  ({'as-is' if r.sign==1 else 'IMU yaw flipped'})")
+    print(f"quiet samples:      {r.quiet_sample_count}"
+          + ("" if r.geometry_reliable else "   ⚠ geometry UNRELIABLE — see warning"))
+    print(f"sign:               {r.sign:+d}  (folded into column_axis)")
     print(f"offset (IMU→XRK):   {r.offset_imu_to_xrk_s:+.3f} s")
-    print(f"peak |corr|:        {r.corr_peak:.4f}")
-    if r.corr_peak < 0.5:
-        print(f"  WARNING: corr below 0.5 — files may not be from the same session")
+    print(f"peak |corr|:        {r.corr_peak:.4f}"
+          + ("   ⚠ WEAK — files may not be from the same session" if r.corr_peak < 0.5 else ""))
     print()
     print(f"XRK laps ({r.xrk_log.laps.num_rows}):")
     for i in range(r.xrk_log.laps.num_rows):

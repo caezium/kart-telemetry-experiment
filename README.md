@@ -78,17 +78,17 @@ Sample output (real session, see [RESULTS.md](RESULTS.md)):
 ```
 Loading + syncing...
   offset (IMU→XRK):   -14.027 s
-  peak |corr|:        0.7835
-  sign:               -1
+  peak |corr|:        0.6580
+  sign:               -1 (folded into column axis)
   column tilt:        40.6° from vertical (k = 0.7588)
 
   lap windows: 6 laps (gps)
-  lap 0:  54.08s   peak steer ±63°   peak yaw rate ±309°/s   peak speed  91.4 km/h
+  lap 0:  54.08s   peak steer ±64°   peak yaw rate ±309°/s   peak speed  90.9 km/h
   lap 1:  44.56s   peak steer ±43°   peak yaw rate ±161°/s   peak speed 107.1 km/h
   lap 2:  44.32s   peak steer ±74°   peak yaw rate ±263°/s   peak speed 108.6 km/h
   lap 3:  44.64s   peak steer ±57°   peak yaw rate ±267°/s   peak speed 108.6 km/h
   lap 4:  43.44s   peak steer ±41°   peak yaw rate ±125°/s   peak speed 106.9 km/h
-  lap 5:  49.48s   peak steer ±54°   peak yaw rate ±381°/s   peak speed 108.5 km/h
+  lap 5:  49.48s   peak steer ±55°   peak yaw rate ±381°/s   peak speed 108.5 km/h
 ```
 
 **One-time per Go 3S unit — bench calibration (Phase 0, optional):**
