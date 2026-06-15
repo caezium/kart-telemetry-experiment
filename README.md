@@ -9,11 +9,14 @@ Not a replacement for proper data systems. A sub-$1k addition that
 captures channels the MyChron does not: steering smoothness, look-ahead
 timing, inside-front lift, slip angle.
 
-**For review: open [`analysis.ipynb`](analysis.ipynb).** Single Jupyter
-notebook, whole workflow end-to-end, plots embedded inline. Walks through
-sync, geometry, lap detection, and per-lap visualization for the May 11
-XTreme session. The narrative form of [`RESULTS.md`](RESULTS.md) — but
-self-executing.
+**For review: open [`analysis.ipynb`](analysis.ipynb).** One **self-contained**
+Jupyter notebook — the entire pipeline (sync, geometry, lap detection,
+steering extraction, plotting) is inlined as code, followed by the run on the
+May 11 XTreme session with plots embedded inline. The only import is the
+low-level `.gyroflow` decoder. Part 1's implementation cells are generated
+verbatim from the test-covered modules (via [`_build_notebook.py`](_build_notebook.py)),
+so the notebook and modules never diverge. The narrative form of
+[`RESULTS.md`](RESULTS.md) — but self-executing.
 
 ## What this measures
 
@@ -136,7 +139,8 @@ kart-telemetry-experiment/
 ├── README.md             this file
 ├── RESULTS.md            end-to-end validation on a real session
 ├── ROADMAP.md            experimental phases, what's next
-├── analysis.ipynb        full workflow notebook (review starts here)
+├── analysis.ipynb        self-contained workflow notebook (review starts here)
+├── _build_notebook.py    regenerates analysis.ipynb from the modules
 ├── pipeline/
 │   ├── extract_imu.py    .gyroflow project file → uniform-rate ImuStream parquet
 │   ├── calibrate.py      Phase 0 bench-validation harness, writes result.json
