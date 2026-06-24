@@ -31,6 +31,26 @@ One camera, one session, steering channel only.
 
 **Exit criterion:** can answer "which corner had my smoothest input on lap 7?"
 
+### Phase 1.5 — Steering ground-truth validation (in progress)
+
+Now that the MyChron 6 2T logs a `Steering Angle` channel, validate the
+camera-only steering against it directly (debug only — production stays
+camera-only).
+
+- [x] Read the wheel-cam IMU straight from the Pro-mode `.mp4` (no Gyroflow
+      export); verified equivalent to the `.gyroflow` decode on the 0511 gold
+      session.
+- [x] Characterize the 6 2T `Steering Angle` (sensor vs model — see
+      `STEERING_VALIDATION.md`): independent of chassis yaw, provenance TBD.
+- [x] Build `analysis/validate_steering.py` (sync → camera steering → align →
+      gain/corr/RMS + per-lap overlays).
+- [ ] **Capture one session with the wheel-cam in Pro Video mode + the 6 2T
+      running** (no such pair exists yet — recent wheel-cam clips were plain
+      Video mode = no gyro). Then run the head-to-head validation.
+
+**Exit criterion:** camera steering correlates with the 6 2T `Steering Angle`
+on a real session (or, if not, we know the camera is the better source and why).
+
 ## Phase 2 — Wheel cam tire observation
 
 Same mount, lens angled to capture front tire.

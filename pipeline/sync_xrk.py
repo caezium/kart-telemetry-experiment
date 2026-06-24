@@ -217,7 +217,11 @@ def chassis_yaw_from_imu(stream: ImuStream,
     bias = estimate_quiet_bias(stream.gyro)
     gyro = stream.gyro - bias
     n_col = detect_column_axis(gyro)
-    rate_along_col = gyro @ n_col
+    # Elementwise projection (== gyro @ n_col). The matmul form trips a spurious
+    # "divide by zero / overflow / invalid in matmul" RuntimeWarning on macOS
+    # Accelerate-BLAS for large (N,3)@(3,) products even with finite input;
+    # the row-wise multiply-and-sum is identical and silent.
+    rate_along_col = (gyro * n_col).sum(axis=1)
 
     fs = stream.sample_rate_hz
     sos = butter(3, lowpass_hz / (fs / 2.0), btype="low", output="sos")
@@ -402,11 +406,14 @@ def sync_imu_to_xrk(gyroflow_path: Path, xrk_path: Path,
                     ) -> SyncedXrk:
     """End-to-end sync. Loads both files, runs cross-correlation, returns
     everything downstream tools need (including the loaded IMU stream, so
-    callers don't parse the .gyroflow a second time).
-    """
-    from pipeline.extract_imu import load_gyroflow
+    callers don't parse the source a second time).
 
-    stream = load_gyroflow(gyroflow_path, source="wheel")
+    `gyroflow_path` may be a .gyroflow project file OR a raw Insta360 .mp4 —
+    `load_imu` dispatches on the extension.
+    """
+    from pipeline.extract_imu import load_imu
+
+    stream = load_imu(gyroflow_path, source="wheel")
     log = load_xrk(xrk_path)
 
     t_imu, yaw_imu, n_col, bias = chassis_yaw_from_imu(stream, lowpass_hz=lowpass_hz)

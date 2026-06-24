@@ -34,6 +34,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
+import subprocess
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +52,9 @@ ACCEL_LOWPASS_HZ = 20.0
 DEFAULT_TARGET_RATE_HZ = 1000.0   # Insta360 Go 3S; only used as a fallback
                                   # if a recording has no inferable rate.
 RESAMPLE_TOLERANCE = 0.05   # if non-uniformity exceeds 5% of median dt, resample
+
+# Extensions we can read IMU directly from via telemetry-parser (gyro2bb).
+MP4_IMU_EXTS = (".mp4", ".insv", ".mov", ".lrv")
 
 
 @dataclass
@@ -249,6 +255,58 @@ def _filter(stream: np.ndarray, cutoff_hz: float, fs: float) -> np.ndarray:
     return sosfiltfilt(sos, stream, axis=0)
 
 
+def _finalize_imu_stream(
+    t_s: np.ndarray,
+    gyro_dps: np.ndarray,
+    accel: np.ndarray,
+    *,
+    source: str,
+    orientation: str,
+    video_path: Path | None = None,
+    gyro_bias_dps: np.ndarray | None = None,
+    target_rate_hz: float | None = None,
+    apply_lowpass: bool = True,
+    path: Path | None = None,
+) -> ImuStream:
+    """Shared back-half of every IMU loader: resample → rad/s → bias → low-pass.
+
+    Inputs are post-orientation body-frame arrays: gyro in deg/s, accel in any
+    consistent linear unit (only its *direction* is used downstream, so the
+    scale is irrelevant — the .gyroflow path feeds m/s², the mp4 path feeds raw
+    counts; both produce identical geometry). Keeping this in one place is what
+    guarantees the .gyroflow and .mp4 readers stay numerically equivalent.
+    """
+    bias_rps = None
+    if gyro_bias_dps is not None:
+        bias_rps = np.deg2rad(np.asarray(gyro_bias_dps, dtype=np.float64))
+
+    if not _is_uniform(t_s):
+        t_s, gyro_dps, accel, fs = _resample_uniform(t_s, gyro_dps, accel, target_rate_hz)
+    else:
+        t_s = t_s - t_s[0]
+        fs = float(1.0 / np.median(np.diff(t_s))) if len(t_s) > 1 else DEFAULT_TARGET_RATE_HZ
+
+    if not (10.0 < fs < 5000.0):
+        raise ValueError(f"Implausible sample rate {fs:.1f} Hz"
+                         + (f" from {path}" if path else ""))
+
+    gyro = np.deg2rad(gyro_dps)
+    if bias_rps is not None:
+        gyro = gyro - bias_rps
+
+    if apply_lowpass:
+        gyro = _filter(gyro, GYRO_LOWPASS_HZ, fs)
+        accel = _filter(accel, ACCEL_LOWPASS_HZ, fs)
+
+    return ImuStream(
+        t=t_s, gyro=gyro, accel=accel,
+        sample_rate_hz=fs, source=source,
+        orientation=orientation,
+        video_path=str(video_path) if video_path else None,
+        gyro_bias_rps=bias_rps,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public load function
 # ---------------------------------------------------------------------------
@@ -289,33 +347,163 @@ def load_gyroflow(
 
     # gyro_bias_dps is provided in post-orientation axes (matches what calibration
     # measures and what Gyroflow stores in IMUTransforms.gyro_bias).
-    bias_rps = None
-    if gyro_bias_dps is not None:
-        bias_rps = np.deg2rad(np.asarray(gyro_bias_dps, dtype=np.float64))
+    return _finalize_imu_stream(
+        t_s, gyro_dps, accel,
+        source=source, orientation=orientation,
+        video_path=video_path, gyro_bias_dps=gyro_bias_dps,
+        target_rate_hz=target_rate_hz, apply_lowpass=apply_lowpass,
+        path=path,
+    )
 
-    if not _is_uniform(t_s):
-        t_s, gyro_dps, accel, fs = _resample_uniform(t_s, gyro_dps, accel, target_rate_hz)
-    else:
-        t_s = t_s - t_s[0]
-        fs = float(1.0 / np.median(np.diff(t_s))) if len(t_s) > 1 else DEFAULT_TARGET_RATE_HZ
 
-    if not (10.0 < fs < 5000.0):
-        raise ValueError(f"Implausible sample rate {fs:.1f} Hz from {path}")
+# ---------------------------------------------------------------------------
+# Direct IMU read from an Insta360 .mp4 (via telemetry-parser's gyro2bb)
+# ---------------------------------------------------------------------------
+#
+# The .gyroflow project file embeds the same `raw_imu` that telemetry-parser
+# extracts from the source video. gyro2bb IS telemetry-parser, so reading the
+# .mp4 directly is equivalent to decoding a .gyroflow — verified to reproduce
+# the .gyroflow geometry on the validation session (offset/corr/k all match).
+# This removes the manual "open in Gyroflow, export project file" step.
+#
+# IMPORTANT: the Go 3S only embeds raw gyro when recording in **Pro Video**
+# mode (is_flowstate_online=false). Plain Video mode bakes FlowState in-camera
+# and stores NO gyro — gyro2bb then yields zero samples and we raise a clear
+# error pointing at the cause.
 
-    gyro = np.deg2rad(gyro_dps)
-    if bias_rps is not None:
-        gyro = gyro - bias_rps
+def _find_gyro2bb(explicit: str | None = None) -> str:
+    """Locate the gyro2bb binary. Override with $GYRO2BB_BIN."""
+    for cand in (explicit, os.environ.get("GYRO2BB_BIN"),
+                 shutil.which("gyro2bb"),
+                 os.path.expanduser("~/.cargo/bin/gyro2bb")):
+        if cand and Path(cand).exists():
+            return cand
+    raise FileNotFoundError(
+        "gyro2bb not found. Install telemetry-parser's gyro2bb "
+        "(cargo install --git https://github.com/AdrianEddy/telemetry-parser "
+        "--example gyro2bb) or set $GYRO2BB_BIN. "
+        "Alternatively, export a .gyroflow project file and pass that instead."
+    )
 
-    if apply_lowpass:
-        gyro = _filter(gyro, GYRO_LOWPASS_HZ, fs)
-        accel = _filter(accel, ACCEL_LOWPASS_HZ, fs)
 
-    return ImuStream(
-        t=t_s, gyro=gyro, accel=accel,
-        sample_rate_hz=fs, source=source,
-        orientation=orientation,
-        video_path=str(video_path) if video_path else None,
-        gyro_bias_rps=bias_rps,
+def _gyro2bb_csv_path(video_path: Path) -> Path:
+    """gyro2bb writes its CSV as `<input-with-extension>.csv` next to the input."""
+    return Path(str(video_path) + ".csv")
+
+
+def _parse_gyro2bb_csv(csv_path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Parse a gyro2bb betaflight-blackbox CSV → (t_seconds, gyro_dps, accel).
+
+    Layout: metadata key/value rows, then a `"loopIteration","time",...` header,
+    then numeric rows: loopIteration, time(µs), gyroADC[0..2] (deg/s),
+    accSmooth[0..2] (raw counts). Non-finite rows (occasional parser glitches)
+    are dropped. Zero data rows means the clip has no embedded gyro — almost
+    always an in-camera-FlowState (plain Video mode) recording.
+    """
+    with csv_path.open() as f:
+        lines = f.readlines()
+    hdr = next((i for i, l in enumerate(lines)
+                if l.startswith('"loopIteration"')), None)
+    if hdr is None:
+        raise ValueError(f"{csv_path.name}: no data header — unrecognised gyro2bb output")
+
+    rows = [l for l in lines[hdr + 1:] if l.strip()]
+    if not rows:
+        raise ValueError(
+            f"{csv_path.name}: gyro2bb extracted 0 IMU samples. The clip was "
+            "almost certainly recorded in plain Video mode (in-camera FlowState), "
+            "which does not store raw gyro — only Pro Video mode does. "
+            "Re-record the wheel-cam in Pro Video mode."
+        )
+
+    data = np.genfromtxt(rows, delimiter=",")
+    if data.ndim == 1:
+        data = data[None, :]
+    t_us = data[:, 1]
+    gyro_dps = data[:, 2:5]
+    accel = data[:, 5:8]
+
+    finite = (np.isfinite(t_us)
+              & np.isfinite(gyro_dps).all(axis=1)
+              & np.isfinite(accel).all(axis=1))
+    t_us, gyro_dps, accel = t_us[finite], gyro_dps[finite], accel[finite]
+    if t_us.size < 3:
+        raise ValueError(f"{csv_path.name}: too few valid IMU samples ({t_us.size})")
+
+    order = np.argsort(t_us)
+    return t_us[order] / 1e6, gyro_dps[order], accel[order]
+
+
+def load_insta360_mp4(
+    path: Path,
+    source: str,
+    *,
+    gyro2bb_bin: str | None = None,
+    gyro_bias_dps: np.ndarray | None = None,
+    target_rate_hz: float | None = None,
+    apply_lowpass: bool = True,
+    keep_csv: bool = False,
+) -> ImuStream:
+    """Load IMU directly from an Insta360 video (.mp4/.insv) via gyro2bb.
+
+    Equivalent to `load_gyroflow` for this pipeline's purposes. gyro2bb writes a
+    sidecar CSV next to the video; it is removed afterwards unless keep_csv.
+    """
+    path = Path(path)
+    binp = _find_gyro2bb(gyro2bb_bin)
+    csv_path = _gyro2bb_csv_path(path)
+
+    pre_existing = csv_path.exists()
+    res = subprocess.run([binp, str(path)], capture_output=True, text=True)
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"gyro2bb failed on {path.name} (exit {res.returncode}): "
+            f"{res.stderr.strip()[-500:]}"
+        )
+    if not csv_path.exists():
+        raise RuntimeError(f"gyro2bb produced no CSV for {path.name}")
+
+    try:
+        t_s, gyro_dps, accel = _parse_gyro2bb_csv(csv_path)
+    finally:
+        if not keep_csv and not pre_existing and csv_path.exists():
+            csv_path.unlink()
+
+    # No orientation transform: gyro2bb already emits a consistent body frame,
+    # and the column-axis geometry is invariant to any fixed axis relabelling.
+    return _finalize_imu_stream(
+        t_s, gyro_dps, accel,
+        source=source, orientation="(insta360 mp4 / gyro2bb)",
+        video_path=path, gyro_bias_dps=gyro_bias_dps,
+        target_rate_hz=target_rate_hz, apply_lowpass=apply_lowpass,
+        path=path,
+    )
+
+
+def load_imu(
+    path: Path,
+    source: str,
+    *,
+    gyro_bias_dps: np.ndarray | None = None,
+    target_rate_hz: float | None = None,
+    apply_lowpass: bool = True,
+) -> ImuStream:
+    """Dispatch on extension: .gyroflow → decode project file; video → gyro2bb.
+
+    The single entry point downstream code (sync, analysis) should use so a
+    session can be fed either a .gyroflow or the raw Insta360 .mp4.
+    """
+    path = Path(path)
+    ext = path.suffix.lower()
+    if ext == ".gyroflow":
+        return load_gyroflow(path, source, gyro_bias_dps=gyro_bias_dps,
+                             target_rate_hz=target_rate_hz, apply_lowpass=apply_lowpass)
+    if ext in MP4_IMU_EXTS:
+        return load_insta360_mp4(path, source, gyro_bias_dps=gyro_bias_dps,
+                                 target_rate_hz=target_rate_hz, apply_lowpass=apply_lowpass)
+    raise ValueError(
+        f"Unsupported IMU source '{path.name}': expected a .gyroflow or "
+        f"an Insta360 video {MP4_IMU_EXTS}."
     )
 
 

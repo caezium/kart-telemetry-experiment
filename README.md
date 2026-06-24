@@ -64,17 +64,43 @@ python3 -m venv .venv --system-site-packages
 .venv/bin/jupyter notebook analysis.ipynb
 ```
 
-**Or from the command line:**
+**Or from the command line** — the IMU source can be a `.gyroflow` **or the raw
+Insta360 `.mp4` directly** (no Gyroflow export needed; `gyro2bb`/telemetry-parser
+reads the embedded IMU, verified equivalent to the `.gyroflow` decode):
 
 ```bash
 .venv/bin/python -m analysis.per_lap \
-    path/to/wheel.gyroflow \
+    path/to/PRO_VID_wheel.mp4 \
     path/to/session.xrk \
     --all --out-dir results/my_session/
 ```
 
+> ⚠️ **Record the wheel-cam in Pro Video mode.** Only `PRO_VID_*.mp4`
+> (`is_flowstate_online:false`) embeds the raw gyro. Plain `VID_*.mp4`
+> stabilizes in-camera and discards it — those clips have no usable IMU.
+> Check with `gyro2bb -d clip.mp4 | grep is_flowstate_online`.
+
 Either route generates one 4-panel summary per lap (steering angle,
 kart yaw rate, GPS speed, GPS track) and a stats table.
+
+**Validate steering against a MyChron 6 2T (debug only):**
+
+```bash
+.venv/bin/python -m analysis.validate_steering wheel.mp4 session_6_2t.xrk --all
+```
+
+Compares the camera-only steering to the 6 2T's `Steering Angle` channel.
+See [`STEERING_VALIDATION.md`](STEERING_VALIDATION.md) for method and status.
+
+**Per-lap steering straight from a MyChron 6 2T (no camera needed):**
+
+```bash
+.venv/bin/python -m analysis.xrk_steering_laps session_6_2t.xrk --all
+```
+
+Per-lap steering angle / rate / smoothness (jerk) / correction count, plus a GPS
+track coloured by steering. Driver-input telemetry from the logger's own
+`Steering Angle` — useful even when a session has no usable wheel-cam gyro.
 
 Sample output (real session, see [RESULTS.md](RESULTS.md)):
 
@@ -139,24 +165,29 @@ kart-telemetry-experiment/
 ├── README.md             this file
 ├── RESULTS.md            end-to-end validation on a real session
 ├── ROADMAP.md            experimental phases, what's next
+├── STEERING_VALIDATION.md  camera-vs-MyChron-6-2T steering: method & status
 ├── analysis.ipynb        self-contained workflow notebook (review starts here)
 ├── _build_notebook.py    regenerates analysis.ipynb from the modules
 ├── pipeline/
-│   ├── extract_imu.py    .gyroflow project file → uniform-rate ImuStream parquet
+│   ├── extract_imu.py    .gyroflow OR Insta360 .mp4 → uniform-rate ImuStream
 │   ├── calibrate.py      Phase 0 bench-validation harness, writes result.json
 │   ├── sync_xrk.py       wheel-cam IMU ↔ MyChron XRK time alignment + geometry
 │   ├── sync_streams.py   (legacy) tap-detect sync for multi-cam sessions
 │   └── requirements.txt
 ├── analysis/
 │   ├── per_lap.py        per-lap multi-channel PNG (primary tool)
+│   ├── validate_steering.py  camera steering vs MyChron 6 2T Steering Angle (debug)
+│   ├── characterize_steering_source.py  is the XRK Steering Angle a sensor or model?
+│   ├── xrk_steering_laps.py  per-lap steering view straight from a 6 2T Steering Angle
 │   ├── quicklook.py      single-file IMU sniff-test plot
 │   ├── steering_angle.py (limited) gz-only steering, Mount 1 only
 │   ├── steering_metrics.py per-corner peak / rate / jerk / symmetry
 │   ├── vision_metrics.py   head yaw vs steering lead time (Phase 3)
 │   └── tire_observation.py CV stub for inside-front lift (Phase 2)
 ├── results/
-│   └── session_20260511_xtreme/  per-lap PNGs from the validation session
-├── tests/                pytest suite — 48 tests
+│   ├── session_20260511_xtreme/  per-lap PNGs from the validation session
+│   └── steering_source/           6-2T Steering Angle characterization
+├── tests/                pytest suite — 90 tests
 └── data/
     ├── sessions/         per-session raw data (gitignored)
     └── calibration/      per-unit bench-test recordings (gitignored)
@@ -189,8 +220,11 @@ kart-telemetry-experiment/
   continuity) is sketched but unvalidated.
 - **The Go 3S samples IMU at 1 kHz** (empirically), which is great for
   jerk calculations but means a single session is ~500k samples per
-  axis. All processing handles this fine, but it does mean Gyroflow
-  export takes ~5 s and parquet files are large.
+  axis. All processing handles this fine. The IMU is read straight from
+  the `.mp4` via `gyro2bb` in ~0.3 s — no Gyroflow export step.
+- **The Go 3S only stores raw gyro in Pro Video mode.** Plain Video mode
+  bakes FlowState in-camera and discards the gyro; such clips are
+  unusable for IMU. See [`STEERING_VALIDATION.md`](STEERING_VALIDATION.md).
 - **MyChron XRK format** is read via [`libxrk`](https://pypi.org/project/libxrk/),
   Scott Smith's reverse-engineered parser. No AiM DLL required.
 - **Helmet legality** varies by sanctioning body. Verify your specific

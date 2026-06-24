@@ -185,9 +185,11 @@ def steering_from_synced(stream: ImuStream, sync: SyncedXrk,
 
     HP at `hp_hz` is a small safety net for residual integration drift.
     """
-    # 1. IMU column projection on XRK clock (sign already folded into the axis)
+    # 1. IMU column projection on XRK clock (sign already folded into the axis).
+    #    Elementwise (== gyro @ column_axis) to avoid the spurious macOS
+    #    Accelerate-BLAS matmul RuntimeWarning — see sync_xrk.chassis_yaw_from_imu.
     gyro = stream.gyro - sync.gyro_bias
-    rate_along_col = gyro @ sync.column_axis            # rad/s
+    rate_along_col = (gyro * sync.column_axis).sum(axis=1)   # rad/s
     t_imu_xrk = stream.t + sync.offset_imu_to_xrk_s
 
     # 2. GPS yaw rate from XRK, already glitch-cleaned at the source by
@@ -414,7 +416,9 @@ def lap_summary(lap: LapData) -> dict[str, float]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("gyroflow", type=Path)
+    ap.add_argument("gyroflow", type=Path,
+                    help="wheel-cam IMU source: a .gyroflow project file OR a "
+                         "raw Insta360 .mp4 (Pro Video mode — has embedded gyro).")
     ap.add_argument("xrk", type=Path)
     ap.add_argument("--lap", type=int, default=None,
                     help="Plot just this lap index. Default: the longest one.")
