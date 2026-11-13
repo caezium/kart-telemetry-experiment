@@ -1,0 +1,5 @@
+# Only the dependencies needed by the synthetic example and its imports.
+numpy>=1.26
+scipy>=1.11
+matplotlib>=3.8
+pandas>=2.1

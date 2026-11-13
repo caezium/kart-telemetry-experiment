@@ -1,243 +1,141 @@
 # Kart Telemetry Experiment
 
-Action-camera-based data acquisition for competitive 125 cc karting
-(KZ, X30 Senior, ROK Shifter). Augments a MyChron with **driver input
-quality**, **tire observation**, and **driver vision** data using one
-or two Insta360 Go 3S units as wireless IMU + video sensors.
+**Can a camera mounted on a kart's steering wheel recover the driver's steering input?**
 
-Not a replacement for proper data systems. A sub-$1k addition that
-captures channels the MyChron does not: steering smoothness, look-ahead
-timing, inside-front lift, slip angle.
+This experiment uses an Insta360 Go 3S gyroscope and an AiM MyChron logger to
+separate wheel rotation from chassis yaw, align the recordings, and produce
+per-lap plots. It grew out of a practical question: could existing onboard
+recordings reveal something useful about driving technique?
 
-**For review: open [`analysis.ipynb`](analysis.ipynb).** One **self-contained**
-Jupyter notebook — the entire pipeline (sync, geometry, lap detection,
-steering extraction, plotting) is inlined as code, followed by the run on the
-May 11 XTreme session with plots embedded inline. The only import is the
-low-level `.gyroflow` decoder. Part 1's implementation cells are generated
-verbatim from the test-covered modules (via [`_build_notebook.py`](_build_notebook.py)),
-so the notebook and modules never diverge. The narrative form of
-[`RESULTS.md`](RESULTS.md) — but self-executing.
+**Status: concluded as an exploratory steering study.** The processing pipeline
+ran on real track data. Absolute steering accuracy and a benefit to driving
+performance were not established. The code and results remain here as a case
+study; no further capture or feature work is planned for this experiment.
 
-## What this measures
+[Real-session results](RESULTS.md) · [Executed notebook](analysis.ipynb) ·
+[Run the example](#run-the-example) · [Validation limits](STEERING_VALIDATION.md)
 
-| Channel | Source | MyChron has it? |
-|---|---|---|
-| Lap time, splits, speed, GPS | MyChron (`.xrk`) | yes |
-| Lat/long G, RPM, GPS yaw rate | MyChron (`.xrk`) | yes |
-| Steering angle | Wheel-mounted Go 3S IMU (or MyChron 6) | only on 6 |
-| Steering rate / jerk / corrections | Wheel-mounted Go 3S IMU | no |
-| Inside-front lift duration | Wheel-mounted Go 3S video | no |
-| Slip angle | Wheel-mounted Go 3S video | no |
-| Driver look-ahead timing | Helmet-mounted Go 3S IMU | no |
-| Head stability / fatigue | Helmet-mounted Go 3S IMU | no |
-| Driver POV reference | Helmet-mounted Go 3S video | no |
-| Breathing rate | Helmet-mounted Go 3S audio | no |
+## A lap from the experiment
 
-## Hardware
+![One real lap: estimated steering, logger yaw rate and speed, and GPS track](results/session_20260511_xtreme/lap4.png)
 
-- 1× or 2× Insta360 Go 3S (the small magnetic action cam)
-- Wheel hub mount: VHB or magnetic. **Mount 1** = lens-axis along the
-  steering column (the easy case). **Mount 2** = camera angled
-  forward / down to see the front tire (harder to process, but the
-  pipeline handles it — see [RESULTS.md](RESULTS.md))
-- Helmet mount: stick-on chin bar mount only — never inside the shell,
-  never anywhere that voids cert
-- A MyChron 5 or 6 (already on the kart)
+*XTreme, 11 May 2026. The steering trace is a filtered estimate; the other
+panels come from the logger. This demonstrates the pipeline's output, not
+independent steering accuracy.*
 
-## Quickstart
+The historical run produced six GPS-segmented lap windows. The camera/logger
+alignment used a time offset of −14.03 s and reached a normalized correlation
+of 0.658. That correlation describes the **alignment signals**, not steering
+accuracy. See [the results](RESULTS.md) for the inputs and all six plots.
 
-```bash
-python3 -m venv .venv --system-site-packages
-.venv/bin/pip install -r pipeline/requirements.txt
+## The engineering problem
+
+A wheel-mounted gyro rotates with both the steering wheel and the kart.
+Integrating it directly mixes those two motions. In the simplified model:
+
+```text
+gyro projected onto column = steering rate + k × chassis yaw rate
+k = |column axis · vertical|
 ```
 
-**Per session — primary path (notebook):**
+The real-session path estimates the column axis from gyro covariance, uses
+quiet accelerometer samples to estimate its tilt, and aligns the camera with
+the logger by correlating yaw-related signals. It subtracts the projected
+logger yaw rate, integrates the remainder, and removes slow integration drift.
 
-```bash
-# 1. Export a .gyroflow project file from the wheel video.
-#    In Gyroflow: open the .mp4 → File → Save (creates `*.gyroflow`).
-
-# 2. Copy the .xrk off the MyChron's SD card.
-
-# 3. Edit the GYROFLOW / XRK paths at the top of analysis.ipynb,
-#    then run all cells. Plots and stats appear inline.
-.venv/bin/jupyter notebook analysis.ipynb
+```mermaid
+flowchart LR
+    A[Wheel-camera IMU] --> C[Axis and tilt estimate]
+    A --> D[Time alignment]
+    B[MyChron GPS yaw] --> D
+    C --> E[Subtract projected chassis yaw]
+    D --> E
+    E --> F[Integrate and filter]
+    F --> G[Per-lap steering estimate]
 ```
 
-**Or from the command line** — the IMU source can be a `.gyroflow` **or the raw
-Insta360 `.mp4` directly** (no Gyroflow export needed; `gyro2bb`/telemetry-parser
-reads the embedded IMU, verified equivalent to the `.gyroflow` decode):
+This path **requires the logger**. Geometry estimation assumes wheel rotation
+dominates the relevant gyro motion, and the yaw model does not account for
+every chassis movement. Filtering suppresses drift but also suppresses sustained
+steering, so the output is not an absolute steering-angle sensor.
+
+## Run the example
+
+No camera, logger, private recordings or telemetry decoder is needed for this
+deterministic synthetic example. From a clone of this repository, with Python
+3.11 or newer:
 
 ```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r examples/requirements.txt
+.venv/bin/python -m examples.steering_demo --out-dir results/demo
+```
+
+Open `results/demo/steering-demo.png`. The command also writes the input and
+output traces to CSV and a JSON summary. The checked-in version is below:
+
+![Synthetic illustration: recovered steering changes and loss of sustained steering](docs/images/steering-demo.png)
+
+The example sends generated motion through the existing
+`steering_from_synced` function. **Axis, tilt, bias and clock alignment are
+supplied as known inputs.** It demonstrates the subtraction/integration/filter
+stage and its limitation on a held steering angle. It does not validate camera
+decoding, automatic geometry, synchronization or accuracy on a kart.
+
+### Explore real recordings
+
+The [executed notebook](analysis.ipynb) includes the historical plots and can be
+read on GitHub without running it. It retains the historical implementation
+snapshot and outputs; `_build_notebook.py` generates a new, unexecuted notebook
+from the current modules. Raw recordings are not distributed, so the historical
+result cannot be regenerated from a clone alone.
+
+To process your own compatible recordings:
+
+```bash
+.venv/bin/python -m pip install -r pipeline/requirements.txt
 .venv/bin/python -m analysis.per_lap \
-    path/to/PRO_VID_wheel.mp4 \
-    path/to/session.xrk \
-    --all --out-dir results/my_session/
+  /path/to/wheel.gyroflow /path/to/session.xrk \
+  --all --out-dir results/my_session
 ```
 
-> ⚠️ **Record the wheel-cam in Pro Video mode.** Only `PRO_VID_*.mp4`
-> (`is_flowstate_online:false`) embeds the raw gyro. Plain `VID_*.mp4`
-> stabilizes in-camera and discards it — those clips have no usable IMU.
-> Check with `gyro2bb -d clip.mp4 | grep is_flowstate_online`.
+The `.gyroflow` file must contain the embedded IMU samples. Original Insta360
+video input additionally requires the external `gyro2bb` decoder. In the Go 3S
+recordings examined here, Pro Video preserved raw gyro and ordinary Video did
+not. Preserve originals; re-encoded video is not a substitute for sensor data.
 
-Either route generates one 4-panel summary per lap (steering angle,
-kart yaw rate, GPS speed, GPS track) and a stats table.
+## What the experiment established
 
-**Validate steering against a MyChron 6 2T (debug only):**
+- **A working analysis path:** camera IMU ingestion, clock alignment, geometric
+  projection, logger-yaw subtraction and lap plots were exercised on real data.
+- **A repeatable mathematical demonstration:** the synthetic example makes the
+  signal separation visible while showing how drift filtering changes the result.
+- **A clear evidence boundary:** there is no completed comparison against a
+  calibrated, independent steering reference, and no demonstrated coaching or
+  lap-time improvement. Visual plausibility is not calibration.
+
+The project stops here because the next step would be a separate measurement
+validation effort, while the original goal was better karting. Preserving the
+method and its limits is a useful outcome without that further commitment.
+
+## Explore the repository
+
+| Artifact | Purpose |
+|---|---|
+| [RESULTS.md](RESULTS.md) | Historical real-session output and interpretation |
+| [analysis.ipynb](analysis.ipynb) | Executed walkthrough with embedded plots |
+| [examples/steering_demo.py](examples/steering_demo.py) | Runnable synthetic illustration |
+| [pipeline/sync_xrk.py](pipeline/sync_xrk.py) | Clock alignment and geometry estimation |
+| [analysis/per_lap.py](analysis/per_lap.py) | Steering estimate and lap visualization |
+| [STEERING_VALIDATION.md](STEERING_VALIDATION.md) | What remains unverified |
+| [ROADMAP.md](ROADMAP.md) | Closeout and disposition of the original scope |
+
+The tests exercise decoding, calibration, synchronization and analysis contracts
+with synthetic fixtures. After installing the full requirements, run:
 
 ```bash
-.venv/bin/python -m analysis.validate_steering wheel.mp4 session_6_2t.xrk --all
+.venv/bin/python -m pytest -q
 ```
 
-Compares the camera-only steering to the 6 2T's `Steering Angle` channel.
-See [`STEERING_VALIDATION.md`](STEERING_VALIDATION.md) for method and status.
-
-**Per-lap steering straight from a MyChron 6 2T (no camera needed):**
-
-```bash
-.venv/bin/python -m analysis.xrk_steering_laps session_6_2t.xrk --all
-```
-
-Per-lap steering angle / rate / smoothness (jerk) / correction count, plus a GPS
-track coloured by steering. Driver-input telemetry from the logger's own
-`Steering Angle` — useful even when a session has no usable wheel-cam gyro.
-
-Sample output (real session, see [RESULTS.md](RESULTS.md)):
-
-```
-Loading + syncing...
-  offset (IMU→XRK):   -14.027 s
-  peak |corr|:        0.6580
-  sign:               -1 (folded into column axis)
-  column tilt:        40.6° from vertical (k = 0.7588)
-
-  lap windows: 6 laps (gps)
-  lap 0:  54.08s   peak steer ±64°   peak yaw rate ±309°/s   peak speed  90.9 km/h
-  lap 1:  44.56s   peak steer ±43°   peak yaw rate ±161°/s   peak speed 107.1 km/h
-  lap 2:  44.32s   peak steer ±74°   peak yaw rate ±263°/s   peak speed 108.6 km/h
-  lap 3:  44.64s   peak steer ±57°   peak yaw rate ±267°/s   peak speed 108.6 km/h
-  lap 4:  43.44s   peak steer ±41°   peak yaw rate ±125°/s   peak speed 106.9 km/h
-  lap 5:  49.48s   peak steer ±55°   peak yaw rate ±381°/s   peak speed 108.5 km/h
-```
-
-**One-time per Go 3S unit — bench calibration (Phase 0, optional):**
-
-```bash
-# Record the bench protocol described in data/calibration/README.md.
-# Open the recording in Gyroflow → File → Save (creates a .gyroflow project file).
-# Drop it into data/calibration/<UNIT>/original.gyroflow alongside ground_truth.csv.
-
-.venv/bin/python -m pipeline.calibrate data/calibration/<UNIT>/
-```
-
-Writes `result.json` with the per-unit gyro bias and pass/fail. The
-per-session sync also extracts bias from each recording's own quiet
-samples, so the bench calibration isn't strictly required — it's for
-provenance.
-
-## How it works (one paragraph each)
-
-**Sync.** Both the wheel-cam IMU and the MyChron measure chassis yaw
-during corners. Low-pass-filter the IMU's column-axis projection to
-isolate the chassis component, cross-correlate against the XRK's
-`GPS_Yaw_Rate`, and the peak gives the clock offset. Robust against
-multi-second clock drift between independent loggers.
-See [`pipeline/sync_xrk.py`](pipeline/sync_xrk.py).
-
-**Steering extraction.** The wheel-cam gyro projected onto the column
-axis is `ω_steering + k · ω_chassis_yaw` where the column comes from
-PCA of the gyro covariance and `k = |column · world_up|` from the
-recording's own gravity vector. Subtract `k · GPS_Yaw_Rate` (from
-XRK), integrate the residual, and you have pure steering input — the
-right way to do it. HP-filtering alone leaks chassis yaw at corner
-frequencies. See [`analysis/per_lap.py`](analysis/per_lap.py).
-
-**Lap detection.** Prefer the XRK's beacon-crossing markers if they
-look sensible (>1 lap, max duration <120 s). Otherwise fall back to
-GPS return-to-start (kart back within 25 m of where it first started
-moving). In practice the beacon detection often misfires; the GPS
-fallback handles real recordings cleanly.
-
-## Project layout
-
-```
-kart-telemetry-experiment/
-├── README.md             this file
-├── RESULTS.md            end-to-end validation on a real session
-├── ROADMAP.md            experimental phases, what's next
-├── STEERING_VALIDATION.md  camera-vs-MyChron-6-2T steering: method & status
-├── analysis.ipynb        self-contained workflow notebook (review starts here)
-├── _build_notebook.py    regenerates analysis.ipynb from the modules
-├── pipeline/
-│   ├── extract_imu.py    .gyroflow OR Insta360 .mp4 → uniform-rate ImuStream
-│   ├── calibrate.py      Phase 0 bench-validation harness, writes result.json
-│   ├── sync_xrk.py       wheel-cam IMU ↔ MyChron XRK time alignment + geometry
-│   ├── sync_streams.py   (legacy) tap-detect sync for multi-cam sessions
-│   └── requirements.txt
-├── analysis/
-│   ├── per_lap.py        per-lap multi-channel PNG (primary tool)
-│   ├── validate_steering.py  camera steering vs MyChron 6 2T Steering Angle (debug)
-│   ├── characterize_steering_source.py  is the XRK Steering Angle a sensor or model?
-│   ├── xrk_steering_laps.py  per-lap steering view straight from a 6 2T Steering Angle
-│   ├── quicklook.py      single-file IMU sniff-test plot
-│   ├── steering_angle.py (limited) gz-only steering, Mount 1 only
-│   ├── steering_metrics.py per-corner peak / rate / jerk / symmetry
-│   ├── vision_metrics.py   head yaw vs steering lead time (Phase 3)
-│   └── tire_observation.py CV stub for inside-front lift (Phase 2)
-├── results/
-│   ├── session_20260511_xtreme/  per-lap PNGs from the validation session
-│   └── steering_source/           6-2T Steering Angle characterization
-├── tests/                pytest suite — 90 tests
-└── data/
-    ├── sessions/         per-session raw data (gitignored)
-    └── calibration/      per-unit bench-test recordings (gitignored)
-```
-
-## Design principles
-
-1. **IMU first, video second.** The gyro is the cleanest signal. CV is
-   for things only video can answer (tire state, vision direction).
-2. **GPS / speed from MyChron only.** The Go 3S has no GPS. Don't
-   integrate the accelerometer for displacement — it drifts to
-   nonsense in 30 seconds.
-3. **One mount, multiple outputs.** A wheel-cam angled at the tire
-   gives both steering IMU *and* tire video. Gyroflow's IMU
-   stabilization de-rotates the video for free.
-4. **Cross-correlation, not clocks.** Independent loggers' wall
-   clocks drift seconds-to-tens-of-seconds. Align using a physical
-   signal both measure.
-5. **Don't trust integrated angle for long.** Re-zero at known
-   straight moments. Subtract chassis yaw using independent
-   measurements when available.
-
-## Known gaps / open problems
-
-- **Slip angle from video** is technically possible but ill-defined at
-  30 fps and with motion blur. Need 100+ fps and clean lighting to be
-  useful. Currently a stub.
-- **Inside-front lift detection** needs a labeled clip dataset. The
-  CV approach (background subtraction + bottom-of-frame ground
-  continuity) is sketched but unvalidated.
-- **The Go 3S samples IMU at 1 kHz** (empirically), which is great for
-  jerk calculations but means a single session is ~500k samples per
-  axis. All processing handles this fine. The IMU is read straight from
-  the `.mp4` via `gyro2bb` in ~0.3 s — no Gyroflow export step.
-- **The Go 3S only stores raw gyro in Pro Video mode.** Plain Video mode
-  bakes FlowState in-camera and discards the gyro; such clips are
-  unusable for IMU. See [`STEERING_VALIDATION.md`](STEERING_VALIDATION.md).
-- **MyChron XRK format** is read via [`libxrk`](https://pypi.org/project/libxrk/),
-  Scott Smith's reverse-engineered parser. No AiM DLL required.
-- **Helmet legality** varies by sanctioning body. Verify your specific
-  series before the chin-bar mount goes on.
-
-## Why this exists
-
-The MyChron 6 finally added a steering gyro, but most of the field is
-on 5s. A camera-based approach gives 4s/5s drivers the same input data
-plus things even the 6 does not have (vision, tire). For a competitive
-125 cc driver looking to find the last 0.2 s/lap, the
-highest-leverage unmeasured channels are: **driver vision**,
-**steering smoothness**, and **inside-front lift behavior**. This
-project targets exactly those.
-
-See [`ROADMAP.md`](ROADMAP.md) for phased build plan.
+Experimental tire/vision utilities retained in the repository are outside this
+steering case study and are not presented as validated capabilities.

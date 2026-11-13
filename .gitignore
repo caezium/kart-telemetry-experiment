@@ -11,3 +11,4 @@ data/calibration/*/
 *.mp4
 *.insv
 *.lrv
+results/demo/

@@ -1,98 +1,77 @@
-# Steering-angle validation — status & method
+# Steering validation: evidence and limits
 
-Goal: prove the **camera-only** steering output (wheel-cam IMU → chassis-yaw-
-subtracted steering) against an independent **MyChron 6 2T `Steering Angle`**
-reference. The MyChron channel is used *only* to verify/debug — the production
-tool stays camera-only.
+**Final status for the concluded steering experiment:** the real-data pipeline
+produced estimates, but independent steering-angle accuracy was not established.
+There is no remaining track-capture commitment.
 
-## TL;DR
+## Two different questions
 
-- **Camera IMU now reads straight from the Pro-mode `.mp4`** — no manual Gyroflow
-  export. Validated to reproduce the `.gyroflow` decode exactly on the 0511 gold
-  session (offset −14.03 s, corr 0.658, k = 0.7588, tilt 40.6°).
-- **Blocker for the recent footage:** the Go 3S only embeds raw gyro in **Pro
-  Video** mode. All the June 18 & June 20 wheel-cam clips were shot in plain
-  **Video** mode (in-camera FlowState), which discards the gyro. They are
-  unusable for IMU — the samples were never written.
-- **No (Pro-camera + 6-2T) pair exists on disk yet**, so the head-to-head
-  validation runs on the *next* Pro-mode track day. The harness is built and
-  tested, ready to run.
-- The 6-2T `Steering Angle` is an **independent** signal (not a chassis-yaw
-  restatement) but its provenance (real sensor vs AiM estimate) is undetermined
-  from the XRK alone — the camera will be the tiebreaker.
+The May 11 session shows that the camera and logger can be decoded, aligned and
+turned into per-lap output. Its logger provides GPS yaw for chassis subtraction.
+That is a processing demonstration, not a comparison against known steering.
 
-## 1. Camera ingestion from `.mp4` (done)
+A separate comparison was proposed against the MyChron 6 2T `Steering Angle`
+channel. The experiment did not complete a matching Pro Video camera/6 2T
+reference capture. The channel's physical origin and calibration were also not
+established. It must not be treated as ground truth merely because it is named
+`Steering Angle`.
 
-`pipeline/extract_imu.py`:
-- `load_insta360_mp4(path, source)` shells out to `gyro2bb` (telemetry-parser,
-  the engine Gyroflow itself uses), parses the betaflight-blackbox CSV, and
-  returns the same `ImuStream` the `.gyroflow` path produces. gyro2bb output
-  IS the data a `.gyroflow` caches, so the two are equivalent — the back half of
-  both loaders is the shared `_finalize_imu_stream`.
-- `load_imu(path, source)` dispatches by extension (`.gyroflow` vs video).
-- `pipeline.sync_xrk` and `analysis.*` accept either transparently.
+## Evidence retained
 
-Verify a clip has usable gyro:
+| Evidence | What it supports | What it does not establish |
+|---|---|---|
+| [Historical lap plots](results/session_20260511_xtreme/) | The real-data processing path ran | Absolute steering accuracy or driving improvement |
+| [Synthetic example](examples/steering_demo.py) | Subtraction, integration and filtering with known inputs | Automatic geometry, time alignment or real sensor accuracy |
+| [Regression tests](tests/) | Behavior under the fixtures' assumptions | Performance on unseen track recordings |
+| [XRK characterization](analysis/characterize_steering_source.py) | Examining the logged channel's dynamics | Sensor identity, calibration or independence from every possible model |
 
-```bash
-gyro2bb -d clip.mp4 | grep is_flowstate_online   # must be false
-```
+The historical characterization found a weak fit to a simple yaw-rate/speed
+model and nonzero variation at low speed. Those observations argue against that
+particular model; they do not prove a calibrated physical steering sensor.
+The low-speed subset was below 2 m/s, not an independently observed stationary
+wheel sweep.
 
-## 2. The FlowState gyro gotcha (recording requirement)
+## Signal-processing limits
 
-| recording mode | filename | `is_flowstate_online` | raw gyro |
-|---|---|---|---|
-| Pro Video | `PRO_VID_*.mp4` | `false` (stabilize later in Studio) | ✅ embedded (~1 kHz) |
-| Video | `VID_*.mp4` | `true` (stabilized in-camera) | ❌ discarded |
+The published real-session path uses camera IMU **and logger GPS yaw**. It is
+not a validated camera-only measurement. Its column estimate depends on which
+motion dominates gyro covariance; its gravity estimate needs quiet samples.
+Chassis pitch/roll, mounting movement, yaw-reference errors and timing errors
+can contaminate the recovered steering rate.
 
-Confirmed across all 71 clips on the Studio: every `PRO_VID_*` had gyro, every
-`VID_*` had none. **Always record the wheel-cam in Pro Video mode.** Last
-gyro-bearing clip on disk: `PRO_VID_20260607_092516_00_006` (2026-06-07).
+Integration accumulates residual errors. The default 0.05 Hz high-pass filter
+reduces drift but also removes slowly varying and sustained steering. Therefore
+the plotted angle is a band-limited estimate, not an absolute wheel position.
+The synthetic example deliberately includes a held angle to expose this.
 
-## 3. MyChron 6 2T `Steering Angle` — characterization
+Synchronization correlation measures agreement between the signals used to find
+the clock offset. It is not a steering-accuracy score, and fitting lag, gain and
+offset afterward must not be reported as raw sensor accuracy.
 
-`analysis/characterize_steering_source.py` (run on `JUN 70_XTreme_a_0040`,
-2026-06-20):
+## Retained comparison tool
 
-- Bicycle-model fit `steer ≈ a·(yaw_rate/v)` is **weak**: R² = 0.04, residual
-  98%. So `Steering Angle` is **not** a restatement of chassis yaw — i.e. it is
-  *not* circular with the pipeline's `k·GPS_Yaw_Rate` subtraction. Good.
-- It **reads at standstill** (<2 m/s: 19° std, 42° p95), which a `r/v` model
-  cannot produce.
-- It is steering-bandwidth, not noise: 90% of energy below 2.8 Hz (median 0.9 Hz),
-  only 3% above 5 Hz.
-- But even lag-compensated it couples only **weakly** to lateral-G / yaw-rate
-  (~0.24, best lag ≈ −0.22 s).
-
-**Verdict:** an independent, steering-bandwidth signal — either a real column
-sensor or a proprietary AiM estimate; the XRK alone can't decide. The wheel-cam
-(a *direct physical* measurement of wheel rotation) is the tiebreaker.
-
-![steering source](results/steering_source/steering_source_JUN%20%2070_XTreme_a_0040.png)
-
-## 4. The validation harness (built, tested, awaiting data)
-
-`analysis/validate_steering.py`:
+For independent follow-up with suitable recordings:
 
 ```bash
-python -m analysis.validate_steering wheel.mp4 session_6_2t.xrk --all --out-dir results/val/
+python -m analysis.validate_steering wheel.gyroflow session_6_2t.xrk \
+  --all --out-dir results/validation
 ```
 
-Syncs the wheel-cam to the XRK, builds the production camera steering, aligns it
-to `Steering Angle` (residual lag from rate cross-correlation on top of the
-coarse clock sync), fits `camera ≈ gain·xrk + offset`, and reports correlation
-(angle + rate), gain, RMS, with per-lap overlays.
+The tool aligns the streams, compares the logger-assisted camera estimate with
+the XRK channel, and reports angle/rate correlation, fitted gain and offset,
+residual lag, and RMS **after** the gain/offset fit.
 
-Interpreting the result:
+Agreement would justify further investigation of calibration and shared error
+sources. Disagreement would require checking both sources, the model and timing.
+Neither source wins by assumption. The CLI reports waveform agreement without
+claiming that correlation establishes physical accuracy.
 
-| outcome | meaning |
-|---|---|
-| high corr, gain≈1 | both agree — camera method cross-validated |
-| high corr, gain≠1 | same dynamics, different scale (units/steering-ratio) — calibrate scale |
-| low corr | they disagree — trust the camera (direct measurement); investigate the XRK channel |
+## Recording-format finding
 
-## Next step (needs a track day)
+In the Go 3S files examined during development, `PRO_VID_` recordings retained
+raw gyro while ordinary `VID_` recordings with in-camera stabilization did not.
+Filename and metadata flags are useful hints; an actual IMU decode is the
+decisive check. Re-encoded footage may have lost the original telemetry.
 
-Record one session with: wheel-cam in **Pro Video** mode + MyChron 6 2T running.
-Then `validate_steering.py <that .mp4> <that .xrk> --all`. That is the first true
-camera-vs-ground-truth steering check.
+Original camera and logger files are not included in this public case study.
+Nothing in the closeout authorizes deleting original recordings.

@@ -44,18 +44,22 @@ def code(text):
 
 # ---------------------------------------------------------------------------
 md("""
-# Kart Telemetry — End-to-End Workflow (self-contained)
+# Kart Telemetry — Historical Processing Walkthrough
 
 Sync a wheel-cam Insta360 Go 3S (`.gyroflow`) to a MyChron logger (`.xrk`),
 segment by lap, and produce per-lap steering / speed / track telemetry —
-**all in this one notebook**.
+**with the analysis implementation embedded below**.
+
+**Concluded experiment.** These are historical outputs, not an independent
+validation of steering accuracy. Raw recordings are not distributed; edit the
+input paths to rerun on your own data. The [synthetic example](README.md#run-the-example)
+runs without private files. See [validation limits](STEERING_VALIDATION.md).
 
 The full implementation is inlined below (Part 1), followed by the run on a
 real session (Part 2). The only external import is the low-level `.gyroflow`
 decoder (`load_gyroflow`) — base91→zlib→CBOR plumbing that isn't part of the
-analysis itself. Everything else — sync, geometry, lap detection, steering
-extraction, plotting — is defined here and is identical to the project's
-test-covered modules.
+analysis itself. The analysis code is embedded from the project modules. Outputs below are
+retained from the historical execution; they were not rerun for the closeout.
 
 **Contents**
 - **Part 1 — the pipeline**: [Setup](#part-1) · [Sync implementation](#sync-impl) · [Lap + steering implementation](#lap-impl)
@@ -94,8 +98,8 @@ from scipy.signal import butter, correlate, sosfiltfilt
 from pipeline.extract_imu import ImuStream, load_gyroflow
 
 # === EDIT THESE for your session ===========================================
-GYROFLOW = Path("/Users/henry/Desktop/PRO_VID_20260511_145850_00_060.gyroflow")
-XRK      = Path("/Users/henry/Desktop/xrk/a_a_XTreme_a_0619.xrk")
+GYROFLOW = Path("data/sessions/example/wheel.gyroflow")
+XRK      = Path("data/sessions/example/session.xrk")
 # ===========================================================================
 """)
 
@@ -108,9 +112,9 @@ Both streams independently measure the chassis yawing through corners — the
 MyChron via GPS heading rate (`GPS_Yaw_Rate`), the wheel cam via the
 low-frequency component of its gyro projected onto the steering-column axis.
 Cross-correlating them recovers the clock offset between the two devices
-(which drift independently — trusting wall-clocks doesn't work).
+(whose timestamps disagreed with the fitted alignment in this session).
 
-Geometry, for a wheel cam at any angle:
+Simplified geometry, assuming a fixed steering-column axis:
 
 $$\\omega_{\\text{along column}} = \\omega_{\\text{steering}} + k \\cdot \\omega_{\\text{chassis yaw}}$$
 
@@ -161,8 +165,6 @@ log = load_xrk(XRK)   # defined inline above; silences libxrk's cosmetic warning
 m = log.metadata
 print("XRK log:")
 print(f"  recording:    {m['Log Date']} {m['Log Time']}")
-print(f"  driver:       {m['Driver']!r} @ track {m['Venue']!r}")
-print(f"  logger model: {m['Logger Model ID']}, ID {m['Logger ID']}")
 print(f"  duration:     {log.laps['end_time'][-1].as_py()/1000:.1f} s")
 print(f"  channels:     {len(log.channels)}")
 print(f"  XRK laps:     {log.laps.num_rows} (beacon-detected — often unreliable; see Laps)")
@@ -174,7 +176,7 @@ md("""
 ### Synchronize
 
 Run the cross-correlation. `corr_peak` is a genuine normalized
-cross-correlation in [0, 1] (>0.5 is a confident match).
+cross-correlation in [0, 1] for the alignment signals; it is not steering accuracy.
 """)
 
 code("""\
@@ -252,8 +254,8 @@ md("""
 <a id="laps"></a>
 ### Lap detection
 
-The XRK beacon markers are unreliable in practice (often only fire once or
-twice per session). GPS return-to-start detection is the fallback.
+This recording's beacon markers were incomplete. GPS return-to-start
+detection supplies approximate lap boundaries as a fallback.
 """)
 
 code("""\
@@ -355,15 +357,18 @@ md("""
 <a id="learned"></a>
 ### What we learned
 
-- **Go 3S IMU runs at 1 kHz**, not ~200 Hz — great for jerk math.
-- **Wall-clock sync fails**; cross-correlation of chassis yaw is reliable
-  (here the device clocks disagreed by ~17 s).
-- **MyChron beacon lap detection is unreliable**; GPS return-to-start works.
+- **This recording has 1 kHz IMU samples.**
+- **Timestamps and fitted alignment differed by about 17 s** in this run;
+  correlation supplied an alternative offset, not proof of steering accuracy.
+- **Beacon markers were incomplete here**; GPS provided approximate lap windows.
 - **`GPS Speed` is m/s** in the XRK, not km/h.
 - **Naive integration leaks chassis yaw** at corner frequencies — you must
   subtract `k · GPS_Yaw_Rate`, restricted to the IMU/GPS time overlap (a
   high-pass filter alone cannot separate the two).
-- **PCA finds the column axis** in body frame for any wheel-mount tilt.
+- **PCA estimates a candidate column axis**, assuming steering dominates
+  the relevant gyro covariance. The axis was not independently measured.
+- **High-pass filtering removes sustained steering along with drift.**
+  A plausible trace does not establish absolute steering accuracy.
 
 Point `GYROFLOW` / `XRK` at the top at a different session and re-run.
 """)

@@ -1,107 +1,42 @@
-# Roadmap
+# Steering experiment closeout
 
-Phased build, smallest tracer-bullet first. Each phase ends with a usable artifact.
+**Concluded · 13 November 2026**
 
-## Phase 0 — Bench validation (no kart)
+The steering experiment is complete as an exploratory engineering case study.
+It is not complete as a calibrated steering instrument or a demonstrated
+coaching tool. No additional track sessions or feature development are planned
+for this experiment.
 
-Verify the toolchain end-to-end before going trackside.
+## What is retained
 
-- [ ] Mount Go 3S on a known-angle test rig (cardboard, protractor)
-- [ ] Record video while rotating through a known sweep (e.g., ±90° at fixed rate)
-- [ ] Run Gyroflow CSV export
-- [ ] Confirm `pipeline/extract_imu.py` reproduces the swept angle within ±2°
-- [ ] Confirm drift over a 60s static recording is < 5°
+The [README](README.md) presents the question, method and outcome. The
+[real-session results](RESULTS.md) and [executed notebook](analysis.ipynb)
+preserve the historical analysis. A [synthetic example](examples/steering_demo.py)
+lets a reader inspect the core signal processing without private recordings.
+The implementation and its existing tests remain available for study.
 
-**Exit criterion:** known input → predicted output within tolerance.
+## Where the original scope ended
 
-## Phase 1 — Wheel mount, single session
+| Workstream | Disposition |
+|---|---|
+| Camera IMU ingestion and logger synchronization | Implemented; historical real-session output retained |
+| Per-lap steering estimates and plots | Implemented; absolute accuracy remains unverified |
+| Known-angle bench calibration | Harness exists; physical calibration not established by this case study |
+| Independent steering-reference comparison | Harness exists; a matched reference capture was not completed |
+| Tire observation, helmet look-ahead, multi-stream coaching and field beta | Removed from this experiment's active scope |
 
-One camera, one session, steering channel only.
+The original backlog is available in Git history. Its unchecked tasks are not
+remaining commitments. There is no pending request to collect more track data,
+perform a clap test, or build a ghost comparison.
 
-- [ ] Mount on wheel hub, on rotation axis (verify with bench-test calibration recording first)
-- [ ] Record one full session (~15 min)
-- [ ] Extract IMU CSV via Gyroflow
-- [ ] Run `analysis/steering_metrics.py` to produce per-lap:
-  - peak steering angle per corner
-  - steering rate distribution
-  - jerk integral per corner (smoothness score)
-  - correction count per corner
-- [ ] Sync to MyChron lap markers manually (clap test)
-- [ ] Output: PDF/HTML report with per-corner metrics overlaid on lap times
+## Why stop here
 
-**Exit criterion:** can answer "which corner had my smoothest input on lap 7?"
+The intended outcome was practical improvement in driving. The experiment
+produced useful engineering work, but it did not establish an actionable
+coaching benefit. Continuing would require a separate validation effort for
+sensor accuracy, mounting stability and interpretation.
 
-### Phase 1.5 — Steering ground-truth validation (in progress)
-
-Now that the MyChron 6 2T logs a `Steering Angle` channel, validate the
-camera-only steering against it directly (debug only — production stays
-camera-only).
-
-- [x] Read the wheel-cam IMU straight from the Pro-mode `.mp4` (no Gyroflow
-      export); verified equivalent to the `.gyroflow` decode on the 0511 gold
-      session.
-- [x] Characterize the 6 2T `Steering Angle` (sensor vs model — see
-      `STEERING_VALIDATION.md`): independent of chassis yaw, provenance TBD.
-- [x] Build `analysis/validate_steering.py` (sync → camera steering → align →
-      gain/corr/RMS + per-lap overlays).
-- [ ] **Capture one session with the wheel-cam in Pro Video mode + the 6 2T
-      running** (no such pair exists yet — recent wheel-cam clips were plain
-      Video mode = no gyro). Then run the head-to-head validation.
-
-**Exit criterion:** camera steering correlates with the 6 2T `Steering Angle`
-on a real session (or, if not, we know the camera is the better source and why).
-
-## Phase 2 — Wheel cam tire observation
-
-Same mount, lens angled to capture front tire.
-
-- [ ] Calibrate Gyroflow stabilization to keep tire steady in frame
-- [ ] Record session with tire visible
-- [ ] Manually label inside-front lift events in 5–10 corners
-- [ ] Build CV detector (frame differencing on tire-vs-ground boundary)
-- [ ] Validate detector against manual labels
-- [ ] Output: lift duration per corner, plotted vs lap time
-
-**Exit criterion:** detector agrees with manual labels >85% of the time.
-
-## Phase 3 — Helmet mount
-
-Add second Go 3S, chin-bar mounted.
-
-- [ ] **Verify series regulations first.** Document compliance.
-- [ ] Mount on chin bar, lens forward
-- [ ] Record session with both wheel-cam and helmet-cam running
-- [ ] Extract head IMU separately
-- [ ] Compute head yaw rate timeline
-- [ ] Cross-correlate head yaw events vs steering input events per corner
-- [ ] Compute look-ahead lead time (median ms between head turn onset and steering input onset)
-
-**Exit criterion:** can quantify "I look 0.34s ahead of my hands at Turn 3, and 0.08s at Turn 7" — the latter is the corner to coach.
-
-## Phase 4 — Multi-stream debrief tool
-
-Stitch everything together into a usable debrief artifact.
-
-- [ ] Synced timeline plot: lap time, speed, lat-G (MyChron) + steering angle/rate (wheel) + head yaw (helmet) + driver POV thumbnail track
-- [ ] Per-corner cards: input quality score, lift duration, look-ahead time
-- [ ] Lap-over-lap fatigue indicator (head stability + steering jerk + breathing rate composite)
-- [ ] HTML output a coach can scrub through
-
-**Exit criterion:** a competitive driver and their coach use it for an actual debrief and come away with one specific actionable.
-
-## Phase 5 — Field beta
-
-Hand it to a second driver. See if it survives a stranger.
-
-- [ ] Setup-from-zero docs
-- [ ] One-command session ingestion
-- [ ] Standardized session metadata schema (track, kart number, tire compound, weather, kart setup snapshot)
-
-**Exit criterion:** another 125cc driver runs a full session through the tool without my help.
-
-## Stretch
-
-- Slip angle from high-frame-rate tire video (needs 1080p120+ and good lighting)
-- Tire wear progression from session-to-session
-- Setup change A/B comparison view (axle stiffness, seat position, etc.)
-- Kart-to-kart input comparison (same track, same conditions, two drivers)
+If someone independently continues the method, the first question is measurement
+validity: compare against a calibrated steering reference, including long
+held angles, synchronization error and drift. The [validation notes](STEERING_VALIDATION.md)
+explain why correlation or a plausible plot alone cannot settle that question.

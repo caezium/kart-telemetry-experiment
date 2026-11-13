@@ -1,8 +1,13 @@
-# Results — XTreme session, 2026-05-11
+# Historical results — XTreme, 11 May 2026
 
-End-to-end validation of the wheel-cam-IMU + MyChron-XRK pipeline on a
-real driving session at the XTreme track. Six clean laps recovered from
-~9 minutes of mixed pit / on-track recording.
+A historical run of the wheel-camera IMU + MyChron XRK pipeline on a real
+driving session. Six GPS-segmented windows were recovered from about nine
+minutes of mixed pit/on-track recording, including out/in-lap windows.
+
+**Evidence boundary:** this demonstrates processing, not independently verified
+steering accuracy. The raw recordings are not distributed. These results and
+the embedded notebook outputs are retained from the original run; the closeout
+did not rerun that private session. See [validation limits](STEERING_VALIDATION.md).
 
 ## Inputs
 
@@ -21,7 +26,7 @@ axis isn't aligned with any body axis.
 
 ```
 offset (IMU → XRK):   -14.027 s
-peak |corr|:           0.658             ← strong match (normalized cross-correlation, 0..1)
+peak |corr|:           0.658             ← alignment correlation, not steering accuracy
 sign:                  -1                ← IMU column axis flipped to match GPS convention
 column tilt:           40.6° from vertical (k = 0.7588)
 ```
@@ -29,7 +34,7 @@ column tilt:           40.6° from vertical (k = 0.7588)
 Notes:
 - The Insta360's wall-clock said the recording started 31 s before the
   XRK logger did. The cross-correlation found a 14-second offset
-  instead — a 17 s clock drift between the two devices. **Trusting the
+  instead — a 17 s discrepancy between the inferred offset and the timestamps. **Trusting the
   wall-clocks would have produced a misaligned analysis.**
 - The column-tilt factor `k = |column · world_up| = 0.7588` is what we
   multiply GPS yaw rate by to subtract chassis yaw from the IMU column
@@ -37,7 +42,7 @@ Notes:
 
 ## Per-lap summary
 
-| Lap | Duration | Peak steering | Peak yaw rate | Peak speed | Mean speed |
+| Lap | Duration | Peak estimated steering | Peak yaw rate | Peak speed | Mean speed |
 |----:|---------:|--------------:|--------------:|-----------:|-----------:|
 | 0   | 54.08 s  | ±64°          | ±309°/s       | 90.9 km/h  | (out-lap)  |
 | 1   | 44.56 s  | ±43°          | ±161°/s       | 107.1 km/h | ~70 km/h   |
@@ -46,9 +51,10 @@ Notes:
 | **4** | **43.44 s** | **±41°**  | ±125°/s       | 106.9 km/h | ~70 km/h   |
 | 5   | 49.48 s  | ±55°          | ±381°/s       | 108.5 km/h | (in-lap)   |
 
-**Lap 4 is the fastest** (43.44 s) and also has the smallest peak
-steering (±41°) and lowest peak yaw rate (±125°/s) — the cleanest,
-smoothest lap.
+**Lap 4 has the shortest detected duration** (43.44 s) and the smallest peak
+estimated steering magnitude among these windows. This single-session
+association does not show that smaller steering inputs caused a faster lap,
+or establish which lap was driven best.
 
 Lap 0 is a warm-up (lower peak speed, larger peak yaw rate from a GPS
 fix wobble). Lap 5 ends with a slowdown to the pit. The four genuine
@@ -61,34 +67,31 @@ See [`results/session_20260511_xtreme/`](results/session_20260511_xtreme/) for a
 
 ## What we found along the way
 
-**The Go 3S IMU runs at 1 kHz, not 200 Hz.** Initial assumption was wrong
+**This Go 3S recording carries IMU samples at 1 kHz.** Initial assumption was wrong
 by 5×; corrected in code.
 
-**The Go 3S has excellent gyro zero-rate bias** out of the box —
-0.01°/s on the wheel-rotation axis, estimated from quiet samples in
-this very session. Formal bench calibration is still worth doing for
-provenance but the unit is in good shape.
+**Quiet samples gave a small estimated gyro bias** in this session, about
+0.01°/s on the wheel-rotation axis. That estimate is not a substitute for a
+controlled calibration or a measurement of stability across sessions.
 
-**MyChron beacon-based lap detection is unreliable.** The XRK marked
+**The logger's beacon markers were incomplete in this recording.** The XRK marked
 only 2 laps in 290 s of driving; the second "lap" actually contained
-6 physical laps fused. GPS-based lap detection (return-to-start
-within a 25 m radius) is the more dependable signal in practice.
+6 physical laps fused. GPS return-to-start detection supplied the six windows used here. Its
+25 m threshold produces approximate boundaries, not official lap timing.
 
-**Wall-clock-based sync is unreliable too.** Camera and logger clocks
-drift independently. The 17-second discrepancy here is normal.
-Cross-correlation of independent measurements of the same physical
-quantity (chassis yaw rate) is the right approach.
+**Device timestamps did not agree with the fitted alignment.** Correlating
+yaw-related signals gave an alternative offset. This run does not establish
+a clock-drift rate or guarantee that the same alignment method works on every
+recording.
 
 **XRK `GPS Speed` is in m/s, not km/h.** Always check units; we got
 this wrong on the first pass.
 
-**For a wheel-cam at any tilt, the gyro covariance's principal
-eigenvector finds the steering column direction automatically.** The
-column axis is what to integrate to get wheel rotation. Combined with
-the geometric tilt factor `k = |column · world_up|` and chassis-yaw
-subtraction from the XRK, we get steering inputs that look like real
-karting: brief flicks at corner entry/exit, ~0° on straights, peaks
-mostly in ±40-60°.
+**PCA supplied a candidate column axis.** This assumes steering rotation
+dominates the relevant covariance. Combining that axis with the quiet-sample
+tilt estimate and logger yaw produced plausible-looking traces. Their shape
+and near-zero straight sections are not proof of correctness, particularly
+because the final high-pass filter removes slow components.
 
 ## Methodology — one paragraph
 
@@ -102,20 +105,25 @@ For each session:
    covariance matrix. Compute the column tilt factor
    `k = |column · world_up|` from the gravity vector in quiet samples.
 3. **Steering input** —
-   `ω_steering = sync.sign · (gyro · column_axis) − k · GPS_Yaw_Rate`.
+   `ω_steering = (gyro − bias) · column_axis − k · GPS_Yaw_Rate`.
+   The stored axis already includes the fitted sign; do not apply it twice.
    Integrate, light HP filter for residual drift cleanup.
 4. **Lap segmentation** — Prefer XRK beacon markers if they look
-   sensible (>1 lap, no lap >120 s). Otherwise GPS return-to-start.
+   sensible (>2 markers, no lap >120 s). Otherwise GPS return-to-start.
 5. **Plot** — Per-lap PNG with steering angle, kart yaw rate, GPS speed,
    GPS track overlay colored by speed.
 
 All implementation in [`pipeline/sync_xrk.py`](pipeline/sync_xrk.py)
 and [`analysis/per_lap.py`](analysis/per_lap.py).
 
-## How to reproduce
+## Running the same path on your own recordings
+
+The private source files are required to regenerate this particular historical
+result. For an example runnable from a fresh clone, use the
+[synthetic demo](README.md#run-the-example).
 
 ```bash
-python3 -m venv .venv --system-site-packages
+python3 -m venv .venv
 .venv/bin/pip install -r pipeline/requirements.txt
 
 # Export a .gyroflow project file from Gyroflow for the wheel-cam video
@@ -127,5 +135,4 @@ python3 -m venv .venv --system-site-packages
     --all --out-dir results/my_session/
 ```
 
-That's the whole pipeline. About 10 seconds of compute for a 9-minute
-session.
+Timing depends on the source format, decoder and machine.

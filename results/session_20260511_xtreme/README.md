@@ -1,6 +1,7 @@
 # XTreme session — 2026-05-11
 
-Six laps from a real driving session. Wheel-cam Go 3S IMU synchronized
+Six GPS-segmented windows from a historical real driving session, including
+out/in-lap windows. Steering accuracy was not independently validated. Wheel-cam Go 3S IMU synchronized
 to MyChron XRK via cross-correlation, then segmented by GPS lap
 detection. See [`../../RESULTS.md`](../../RESULTS.md) for full
 methodology + numbers.
@@ -9,7 +10,7 @@ methodology + numbers.
 
 Each `lapN.png` has four panels:
 
-- **Steering angle (deg)** — from the wheel-cam IMU after chassis-yaw
+- **Estimated steering angle (deg)** — from the wheel-cam IMU after chassis-yaw
   subtraction. Returns near 0 on straights, flicks at corners.
 - **Kart yaw rate (deg/s)** — XRK `GPS_Yaw_Rate`. Peaks during corners.
 - **GPS speed (km/h)** — dips on corner entry, peaks on straights.
@@ -17,7 +18,7 @@ Each `lapN.png` has four panels:
 
 ## Summary
 
-| Lap | Time | Peak steer | Peak yaw rate | Peak speed |
+| Lap | Time | Peak estimated steer | Peak yaw rate | Peak speed |
 |----:|-----:|-----------:|--------------:|-----------:|
 | 0   | 54.08s | ±64° | ±309°/s ¹ | 90.9 km/h |
 | 1   | 44.56s | ±43° | ±161°/s | 107.1 km/h |
@@ -29,12 +30,14 @@ Each `lapN.png` has four panels:
 ¹ Lap 0's peak yaw rate is contaminated by a GPS fix-acquisition spike;
 real cornering yaw rate is ~150°/s.
 
-**Lap 4 was fastest** (43.44 s) with the smallest peak steering — a
-smooth, clean lap.
+**Lap 4 had the shortest detected duration** (43.44 s) and the smallest
+peak estimated steering magnitude. This association is not evidence that the
+steering estimate is accurate or that smaller inputs caused the faster time.
 
 ## Reproducing
 
-From the repo root:
+The raw inputs are not distributed with this repository. With those files,
+run from the repo root:
 
 ```bash
 .venv/bin/python -m analysis.per_lap \

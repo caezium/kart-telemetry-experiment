@@ -1,14 +1,14 @@
-"""Validate the camera-only steering against a MyChron 6 2T `Steering Angle`.
+"""Compare the logger-assisted camera steering estimate with a MyChron 6 2T `Steering Angle`.
 
-This is a DEBUG / verification tool, not part of the production signal path. The
-deliverable stays camera-only; the XRK steering channel is used solely to check
-how well the wheel-cam recovers steering input.
+This is a comparison tool retained from a concluded experiment. The camera
+steering estimate uses XRK GPS yaw for chassis subtraction. The separate XRK
+Steering Angle channel is an uncalibrated comparison source, not ground truth.
 
 What it does
 ------------
 1. Sync the wheel-cam IMU to the XRK (cross-correlation of chassis yaw) — works
    with a .gyroflow or a Pro-mode .mp4 (see pipeline.extract_imu.load_imu).
-2. Build the production camera steering (chassis-yaw-subtracted, integrated) on
+2. Build the logger-assisted camera steering estimate (chassis-yaw-subtracted, integrated) on
    the XRK clock (analysis.per_lap.steering_from_synced).
 3. Load the XRK `Steering Angle` channel.
 4. Align the two (a small residual lag is found by cross-correlating their rates,
@@ -18,15 +18,13 @@ What it does
 
 Interpreting the result
 -----------------------
-The camera physically measures wheel rotation; the XRK channel's provenance is
-uncertain (see analysis.characterize_steering_source — it reads at standstill and
-couples only weakly to chassis yaw, i.e. it is NOT a chassis-yaw restatement, but
-whether it is a real column sensor or an AiM estimate is unknown). So:
-  * high corr + gain≈1  → both agree; strong cross-validation of the camera method
+The gyro measures combined wheel and chassis rotation. The XRK steering
+channel's physical origin and calibration are also uncertain. Neither source
+is ground truth by assumption. Interpret waveform agreement cautiously:
+  * high corr + gain≈1  → compatible waveforms; still check synchronization and calibration
   * high corr + gain≠1  → same shape, different scale (units/steering-ratio) —
-                          still validates the *dynamics*, calibrate the scale
-  * low corr            → they disagree; the camera (a direct measurement) is the
-                          more trustworthy steering source — investigate the XRK.
+                          investigate units and calibration before physical interpretation
+  * low corr            → they disagree; investigate both sources and synchronization.
 
 Usage
 -----
@@ -124,6 +122,15 @@ class SteeringValidation:
                 f"corr(rate)={self.corr_rate:+.3f}  |  cam ≈ {self.gain:+.2f}·xrk "
                 f"{self.offset_deg:+.1f}°  RMS={self.rms_deg:.1f}°  "
                 f"(residual lag {self.residual_lag_s:+.2f}s)")
+
+    def verdict(self) -> str:
+        if not np.isfinite(self.corr_angle):
+            return "Insufficient variation for a meaningful correlation"
+        if abs(self.corr_angle) > 0.7:
+            return f"Strong waveform correlation; fitted gain {self.gain:+.2f}. Physical scale, sign and calibration still need validation."
+        if abs(self.corr_angle) > 0.4:
+            return "Partial waveform correlation; check scale, drift and synchronization"
+        return "Waveforms disagree; investigate both sources and synchronization"
 
 
 def compare_steering(stream: ImuStream, sync: SyncedXrk) -> tuple[
@@ -227,9 +234,7 @@ def main() -> None:
         raise SystemExit(f"\nCannot validate: {e}")
     print("\n=== camera steering vs MyChron Steering Angle ===")
     print(" ", val.summary())
-    verdict = ("AGREE — camera method cross-validated" if abs(val.corr_angle) > 0.7 else
-               "PARTIAL — same dynamics, check scale/lag" if abs(val.corr_angle) > 0.4 else
-               "DISAGREE — trust the camera (direct measurement); investigate the XRK channel")
+    verdict = val.verdict()
     print(f"  --> {verdict}")
 
     out_dir = args.out_dir or args.imu.parent
